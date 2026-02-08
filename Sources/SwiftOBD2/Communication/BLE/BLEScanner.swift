@@ -31,7 +31,7 @@ class BLEPeripheralScanner: ObservableObject {
         CBUUID(string: "18F0"), // e.g. VGate iCar Pro
     ]
 
-    private var foundPeripheralCompletion: ((CBPeripheral?, Error?) -> Void)?
+    var foundPeripheralCompletion: ((CBPeripheral?, Error?) -> Void)?
 
     func addDiscoveredPeripheral(_ peripheral: CBPeripheral, advertisementData: [String: Any], rssi: NSNumber) {
         // Filter out peripherals with invalid RSSI

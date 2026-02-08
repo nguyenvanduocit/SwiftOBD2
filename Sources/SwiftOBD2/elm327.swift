@@ -240,7 +240,7 @@ class ELM327 {
         }
     }
 
-    private func setHeader(header: String) async throws {
+    func setHeader(header: String) async throws {
         _ = try await okResponse("AT SH " + header)
     }
 
@@ -462,14 +462,22 @@ struct BatchedResponse {
     mutating func extractValue(_ cmd: OBDCommand) -> MeasurementResult? {
         let properties = cmd.properties
         let size = properties.bytes
-        guard response.count >= size else { return nil }
-        let valueData = response.prefix(size)
 
-        response.removeFirst(size)
-        //        print("Buffer: \(buffer.compactMap { String(format: "%02X ", $0) }.joined())")
-        let result = cmd.properties.decode(data: valueData, unit: unit)
+        // Extract PID byte from command (e.g., "010C" → 0x0C)
+        let pidHex = String(properties.command.dropFirst(2))
+        guard let pidByte = UInt8(pidHex, radix: 16) else { return nil }
 
-        
+        // Find PID echo byte in response instead of assuming sequential order
+        guard let pidIndex = response.firstIndex(of: pidByte) else { return nil }
+        let startOffset = response.distance(from: response.startIndex, to: pidIndex)
+        guard response.count >= startOffset + size else { return nil }
+
+        let rangeStart = response.index(response.startIndex, offsetBy: startOffset)
+        let rangeEnd = response.index(rangeStart, offsetBy: size)
+        let valueData = response[rangeStart..<rangeEnd]
+        response.removeSubrange(rangeStart..<rangeEnd)
+
+        let result = cmd.properties.decode(data: Data(valueData), unit: unit)
 
         switch result {
         case let .success(measurementResult):

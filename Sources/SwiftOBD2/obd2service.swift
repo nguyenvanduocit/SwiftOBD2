@@ -280,6 +280,35 @@ public class OBDService: ObservableObject, OBDServiceDelegate {
     //        elm327.switchToDemoMode(isDemoMode)
     //    }
 
+    // MARK: - Mode 22 (Enhanced/Manufacturer-Specific)
+
+    /// Sets the CAN header for subsequent commands (e.g., "7E0" for PCM, "726" for BCM).
+    public func setHeader(_ header: String) async throws {
+        let response = try await sendCommandInternal("ATSH\(header)", retries: 3)
+        guard response.contains(where: { $0.uppercased().contains("OK") }) else {
+            throw OBDServiceError.commandFailed(command: "ATSH\(header)", error: ELM327Error.invalidResponse(message: "Expected OK for ATSH"))
+        }
+    }
+
+    /// Sends a Mode 22 (enhanced/manufacturer-specific) PID request and returns raw data bytes.
+    /// - Parameters:
+    ///   - pid: The 2-byte PID hex string (e.g., "1E1C" for transmission temp)
+    ///   - header: The target module header (e.g., "7E0" for PCM)
+    /// - Returns: Raw data bytes after stripping the 62 + PID echo prefix
+    public func requestMode22PID(_ pid: String, header: String) async throws -> Data {
+        try await setHeader(header)
+        let response = try await sendCommandInternal("22\(pid)", retries: 3)
+        guard let responseData = try elm327.canProtocol?.parse(response).first?.data else {
+            throw OBDServiceError.commandFailed(command: "22\(pid)", error: ELM327Error.invalidResponse(message: "No parseable response"))
+        }
+        // Response format: 62 + PID_HI + PID_LO + data bytes
+        guard responseData.count >= 3, responseData[0] == 0x62 else {
+            throw OBDServiceError.commandFailed(command: "22\(pid)", error: ELM327Error.invalidResponse(message: "Expected 62 response prefix"))
+        }
+        // Strip 62 + 2-byte PID echo, return data only
+        return Data(responseData.dropFirst(3))
+    }
+
     /// Sends a raw command to the vehicle and returns the raw response.
     /// - Parameter message: The raw command to send.
     /// - Returns: The raw response from the vehicle.

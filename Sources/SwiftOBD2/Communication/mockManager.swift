@@ -111,10 +111,15 @@ class MOCKComm: CommProtocol {
                 return [response]
             }
         } else  if command.hasPrefix("AT") {
-            let action = command.dropFirst(2)
-            var response = {
+            let action = String(command.dropFirst(2))
+            var response: [String] = {
+                // Handle ATSH with any header (e.g., "SH7E0", "SH726", " SH 7E0")
+                let trimmed = action.replacingOccurrences(of: " ", with: "")
+                if trimmed.hasPrefix("SH") {
+                    return ["OK"]
+                }
                 switch action {
-                case " SH 7E0", "D", "L0", "AT1", "SP0", "SP6", "STFF", "S0":
+                case "D", "L0", "AT1", "SP0", "SP6", "STFF", "S0", "CAF1":
                     return ["OK"]
                 case "Z":
                     return ["ELM327 v1.5"]
@@ -163,6 +168,22 @@ class MOCKComm: CommProtocol {
             let length = String(format: "%02X", response.count / 3 + 1)
             response = header + " " + length + " " + response
             while response.count < 26 {
+                response.append(" 00")
+            }
+            return [response]
+        } else if command.hasPrefix("22") {
+            // Mode 22 (enhanced/manufacturer-specific) mock response
+            var header = ""
+            if ecuSettings.headerOn {
+                header = "7E8"
+            }
+            // Generate mock response: 62 + PID echo + random data bytes
+            let pidEcho = String(command.dropFirst(2)) // e.g., "1E1C"
+            let dataBytes = (0..<2).map { _ in String(format: "%02X", Int.random(in: 0...255)) }.joined(separator: " ")
+            var response = "62 \(pidEcho.chunked(by: 2).joined(separator: " ")) \(dataBytes)"
+            let length = String(format: "%02X", response.replacingOccurrences(of: " ", with: "").count / 2)
+            response = header + " " + length + " " + response
+            while response.count < 28 {
                 response.append(" 00")
             }
             return [response]

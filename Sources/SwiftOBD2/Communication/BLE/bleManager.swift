@@ -163,7 +163,6 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
 
     func centralManagerDidPowerOn() {
         guard let device = peripheralManager.connectedPeripheral else {
-            startScanning(BLEPeripheralScanner.supportedServices)
             return
         }
         connect(to: device)
@@ -339,12 +338,15 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
 
     private func resetConfigure() {
         characteristicHandler.reset()
-        
+        peripheralScanner.foundPeripherals.removeAll()
+        peripheralScanner.foundPeripheralCompletion = nil
+        messageProcessor.reset()
+
         let oldState = connectionState
         connectionState = .disconnected
         if oldState != connectionState {
             OBDLogger.shared.logConnectionChange(from: oldState, to: connectionState)
-            
+
             DispatchQueue.main.async {
                 self.obdDelegate?.connectionStateChanged(state: .disconnected)
             }
