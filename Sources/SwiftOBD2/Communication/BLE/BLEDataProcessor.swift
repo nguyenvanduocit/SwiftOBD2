@@ -1,9 +1,7 @@
-import Combine
-import CoreBluetooth
 import Foundation
 import OSLog
 
-class BLEMessageProcessor {
+actor BLEMessageProcessor {
     private var buffer = Data()
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.app", category: "BLEMessageProcessor")
     private var messageCompletion: (([String]?, Error?) -> Void)?
@@ -60,14 +58,14 @@ class BLEMessageProcessor {
 
 
     func waitForResponse(timeout: TimeInterval) async throws -> [String] {
-            try await withTimeout(seconds: timeout, timeoutError: BLEMessageProcessorError.responseTimeout) { [self] in
-                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<[String], Error>) in
+        guard messageCompletion == nil else {
+            throw BLEMessageProcessorError.commandAlreadyInProgress
+        }
 
-                    // Check if there's already a pending command
-                    assert(messageCompletion == nil, "Concurrent command detected")
-
-
-                    messageCompletion = { response, error in
+        return try await withTimeout(seconds: timeout, timeoutError: BLEMessageProcessorError.responseTimeout) {
+            try await withCheckedThrowingContinuation { continuation in
+                self.assumeIsolated { isolatedSelf in
+                    isolatedSelf.messageCompletion = { response, error in
                         if let response = response {
                             continuation.resume(returning: response)
                         } else if let error = error {
@@ -76,10 +74,10 @@ class BLEMessageProcessor {
                             continuation.resume(throwing: BLEMessageProcessorError.responseTimeout)
                         }
                     }
-
                 }
             }
         }
+    }
 
     func reset() {
            buffer.removeAll()
@@ -98,6 +96,7 @@ enum BLEMessageProcessorError: Error, LocalizedError {
     case writeOperationFailed
     case responseTimeout
     case invalidResponseData
+    case commandAlreadyInProgress
 
     var errorDescription: String? {
         switch self {
@@ -109,6 +108,8 @@ enum BLEMessageProcessorError: Error, LocalizedError {
             return "Timeout waiting for BLE response"
         case .invalidResponseData:
             return "Received invalid response data from BLE device"
+        case .commandAlreadyInProgress:
+            return "Another command is already in progress"
         }
     }
 }

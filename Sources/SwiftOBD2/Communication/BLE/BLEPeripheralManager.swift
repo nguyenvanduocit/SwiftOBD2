@@ -8,10 +8,6 @@ protocol BLEPeripheralManagerDelegate: AnyObject {
 }
 
 class BLEPeripheralManager: NSObject, ObservableObject {
-    func didWriteValue(_ peripheral: CBPeripheral, descriptor: CBDescriptor, error: (any Error)?) {
-
-    }
-
     @Published var connectedPeripheral: CBPeripheral?
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.app", category: "BLEPeripheralManager")
     private let characteristicHandler: BLECharacteristicHandler
@@ -24,14 +20,30 @@ class BLEPeripheralManager: NSObject, ObservableObject {
         super.init()
     }
 
-    func setPeripheral(_ peripheral: CBPeripheral?) {
+    /// Store a peripheral reference and set its delegate, without triggering service discovery.
+    /// Use during state restoration when the central manager may not be powered on yet.
+    func storePeripheral(_ peripheral: CBPeripheral) {
         connectedPeripheral?.delegate = nil
         connectedPeripheral = peripheral
         connectedPeripheral?.delegate = self
+    }
 
+    /// Store a peripheral and immediately trigger service discovery.
+    /// Only call this when the central manager is confirmed `.poweredOn`.
+    func setPeripheral(_ peripheral: CBPeripheral?) {
         if let peripheral = peripheral {
+            storePeripheral(peripheral)
             peripheral.discoverServices(BLEPeripheralScanner.supportedServices)
+        } else {
+            connectedPeripheral?.delegate = nil
+            connectedPeripheral = nil
         }
+    }
+
+    func reset() {
+        connectedPeripheral?.delegate = nil
+        connectedPeripheral = nil
+        connectionCompletion = nil
     }
 
     func waitForCharacteristicsSetup(timeout: TimeInterval) async throws {
@@ -61,6 +73,7 @@ class BLEPeripheralManager: NSObject, ObservableObject {
         if let error = error {
             logger.error("Error discovering characteristics: \(error.localizedDescription)")
             connectionCompletion?(nil, error)
+            connectionCompletion = nil
             return
         }
 
@@ -68,13 +81,15 @@ class BLEPeripheralManager: NSObject, ObservableObject {
 
         characteristicHandler.setupCharacteristics(characteristics, on: peripheral)
 
-        // Check if all required characteristics are set up
         if characteristicHandler.isReady {
             connectionCompletion?(peripheral, nil)
             connectionCompletion = nil
-
-            // Notify delegate
             delegate?.peripheralManager(self, didSetupCharacteristics: peripheral)
+        } else {
+            let error = BLEManagerError.missingPeripheralOrCharacteristic
+            logger.error("Required characteristics not found for service \(service.uuid.uuidString)")
+            connectionCompletion?(nil, error)
+            connectionCompletion = nil
         }
     }
 

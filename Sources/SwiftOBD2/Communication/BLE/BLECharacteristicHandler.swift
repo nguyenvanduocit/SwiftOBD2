@@ -92,8 +92,9 @@ class BLECharacteristicHandler {
             }
             return
         }
-
-        messageProcessor.processReceivedData(data)
+        Task {
+            await messageProcessor.processReceivedData(data)
+        }
     }
 
     func reset() {

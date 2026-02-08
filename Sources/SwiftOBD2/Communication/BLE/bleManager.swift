@@ -165,11 +165,19 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
         guard let device = peripheralManager.connectedPeripheral else {
             return
         }
-        connect(to: device)
+        // Restored peripheral that's still connected: discover services directly
+        // Restored peripheral that disconnected: re-establish connection
+        if device.state == .connected {
+            peripheralManager.setPeripheral(device)
+        } else {
+            connect(to: device)
+        }
     }
 
     func didDiscover(_: CBCentralManager, peripheral: CBPeripheral, advertisementData: [String: Any], rssi: NSNumber) {
-        peripheralScanner.addDiscoveredPeripheral(peripheral, advertisementData: advertisementData, rssi: rssi)
+        Task {
+            await peripheralScanner.addDiscoveredPeripheral(peripheral, advertisementData: advertisementData, rssi: rssi)
+        }
     }
 
     func connect(to peripheral: CBPeripheral) {
@@ -222,9 +230,9 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
 
     func willRestoreState(_: CBCentralManager, dict: [String: Any]) {
         if let peripherals = dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral], let peripheral = peripherals.first {
-            obdDebug("Restoring peripheral: \(peripherals[0].name ?? "Unnamed")", category: .bluetooth)
-            peripheralManager.setPeripheral(peripheral)
-
+            obdDebug("Restoring peripheral: \(peripheral.name ?? "Unnamed")", category: .bluetooth)
+            // Store only - do NOT trigger discovery until centralManager is .poweredOn
+            peripheralManager.storePeripheral(peripheral)
         }
     }
 
@@ -337,10 +345,14 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
     }
 
     private func resetConfigure() {
+        stopScan()
         characteristicHandler.reset()
-        peripheralScanner.foundPeripherals.removeAll()
-        peripheralScanner.foundPeripheralCompletion = nil
-        messageProcessor.reset()
+        peripheralManager.reset()
+
+        Task {
+            await peripheralScanner.reset()
+            await messageProcessor.reset()
+        }
 
         let oldState = connectionState
         connectionState = .disconnected
