@@ -3,29 +3,19 @@ import CoreBluetooth
 import Foundation
 import OSLog
 
-/// Protocol for BLE scanning operations
-protocol BLEScannerProtocol {
-    var foundPeripherals: [CBPeripheral] { get }
-    var peripheralPublisher: AnyPublisher<CBPeripheral, Never> { get }
-
-    func startScanning(services: [CBUUID]?) async throws
-    func stopScanning()
-    func scanForPeripheralAsync(services: [CBUUID]?, timeout: TimeInterval) async throws -> CBPeripheral?
-}
-
 /// Focused component responsible for BLE device discovery and peripheral management
-class BLEPeripheralScanner: ObservableObject {
-    @Published var foundPeripherals: [CBPeripheral] = []
+actor BLEPeripheralScanner {
+    private var foundPeripherals: [CBPeripheral] = []
 
-    private let peripheralSubject = PassthroughSubject<CBPeripheral, Never>()
+    nonisolated let peripheralSubject = PassthroughSubject<CBPeripheral, Never>()
 
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.app", category: "BLEPeripheralScanner")
 
-    var peripheralPublisher: AnyPublisher<CBPeripheral, Never> {
+    nonisolated var peripheralPublisher: AnyPublisher<CBPeripheral, Never> {
         peripheralSubject.eraseToAnyPublisher()
     }
 
-    static let supportedServices = [
+    nonisolated static let supportedServices = [
         CBUUID(string: "FFE0"),
         CBUUID(string: "FFF0"),
         CBUUID(string: "18F0"), // e.g. VGate iCar Pro
@@ -45,31 +35,37 @@ class BLEPeripheralScanner: ObservableObject {
             logger.info("Found new peripheral: \(peripheral.name ?? "Unnamed") - RSSI: \(rssi)")
         }
 
-        // Complete waiting continuation if exists
-        foundPeripheralCompletion?(peripheral, nil)
-        foundPeripheralCompletion = nil // Clear after calling
+        // Clear before calling to prevent double-resume if another peripheral arrives
+        let completion = foundPeripheralCompletion
+        foundPeripheralCompletion = nil
+        completion?(peripheral, nil)
     }
 
     func waitForFirstPeripheral(timeout: TimeInterval) async throws -> CBPeripheral {
-        // If we already have peripherals, return the first one
         if let first = foundPeripherals.first {
             return first
         }
 
-        // Otherwise wait for discovery
         return try await withTimeout(seconds: timeout, timeoutError: BLEScannerError.scanTimeout) {
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<CBPeripheral, Error>) in
-                self.foundPeripheralCompletion = { peripheral, error in
-                    if let peripheral = peripheral {
-                        continuation.resume(returning: peripheral)
-                    } else if let error = error {
-                        continuation.resume(throwing: error)
-                    } else {
-                        continuation.resume(throwing: BLEScannerError.peripheralNotFound)
+            try await withCheckedThrowingContinuation { continuation in
+                self.assumeIsolated { isolatedSelf in
+                    isolatedSelf.foundPeripheralCompletion = { peripheral, error in
+                        if let peripheral = peripheral {
+                            continuation.resume(returning: peripheral)
+                        } else if let error = error {
+                            continuation.resume(throwing: error)
+                        } else {
+                            continuation.resume(throwing: BLEScannerError.peripheralNotFound)
+                        }
                     }
                 }
             }
         }
+    }
+
+    func reset() {
+        foundPeripherals.removeAll()
+        foundPeripheralCompletion = nil
     }
 }
 // MARK: - CBPeripheralDelegate

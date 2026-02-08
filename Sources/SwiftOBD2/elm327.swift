@@ -51,7 +51,6 @@ enum ELM327Error: Error, LocalizedError {
 }
 
 class ELM327 {
-    //    private var obdProtocol: PROTOCOL = .NONE
     var canProtocol: CANProtocol?
 
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.com", category: "ELM327")
@@ -66,6 +65,7 @@ class ELM327 {
     }
 
     private var r100: [String] = []
+    private var currentHeader: String?
 
     var connectionState: ConnectionState = .disconnected {
         didSet {
@@ -104,19 +104,10 @@ class ELM327 {
     ///     - `SetupError.ignitionOff` if the vehicle's ignition is not on.
     ///     - `SetupError.invalidProtocol` if the protocol is not recognized.
     func setupVehicle(preferredProtocol: PROTOCOL?) async throws -> OBDInfo {
-        //        var obdProtocol: PROTOCOL?
         let detectedProtocol = try await detectProtocol(preferredProtocol: preferredProtocol)
-
-        //        guard let obdProtocol = detectedProtocol else {
-        //            throw SetupError.noProtocolFound
-        //        }
-
-        //        self.obdProtocol = obdProtocol
         canProtocol = protocols[detectedProtocol]
 
         let vin = await requestVin()
-
-        //        try await setHeader(header: "7E0")
 
         let supportedPIDs = await getSupportedPIDs()
 
@@ -240,8 +231,27 @@ class ELM327 {
         }
     }
 
-    private func setHeader(header: String) async throws {
+    func setHeader(header: String) async throws {
+        guard currentHeader != header else { return }
         _ = try await okResponse("AT SH " + header)
+        currentHeader = header
+    }
+
+    func withTemporaryHeader<T>(_ header: String, block: () async throws -> T) async throws -> T {
+        let savedHeader = currentHeader
+        try await setHeader(header: header)
+        do {
+            let result = try await block()
+            if let savedHeader = savedHeader {
+                try await setHeader(header: savedHeader)
+            }
+            return result
+        } catch {
+            if let savedHeader = savedHeader {
+                try? await setHeader(header: savedHeader)
+            }
+            throw error
+        }
     }
 
     func stopConnection() {
@@ -279,8 +289,7 @@ class ELM327 {
     func scanForTroubleCodes() async throws -> [ECUID: [TroubleCode]] {
         var dtcs: [ECUID: [TroubleCode]] = [:]
         logger.info("Scanning for trouble codes")
-        let dtcCommand = OBDCommand.Mode3.GET_DTC
-        let dtcResponse = try await sendCommand(dtcCommand.properties.command)
+        let dtcResponse = try await sendCommand(OBDCommand.Mode3.GET_DTC.properties.command)
 
         guard let messages = try canProtocol?.parse(dtcResponse) else {
             return [:]
@@ -289,7 +298,7 @@ class ELM327 {
             guard let dtcData = message.data else {
                 continue
             }
-            let decodedResult = dtcCommand.properties.decode(data: dtcData)
+            let decodedResult = DTCDecoder().decode(data: dtcData, unit: .metric)
 
             let ecuId = message.ecu
             switch decodedResult {
@@ -462,14 +471,18 @@ struct BatchedResponse {
     mutating func extractValue(_ cmd: OBDCommand) -> MeasurementResult? {
         let properties = cmd.properties
         let size = properties.bytes
-        guard response.count >= size else { return nil }
-        let valueData = response.prefix(size)
 
-        response.removeFirst(size)
-        //        print("Buffer: \(buffer.compactMap { String(format: "%02X ", $0) }.joined())")
-        let result = cmd.properties.decode(data: valueData, unit: unit)
+        // Extract PID byte from command (e.g., "010C" → 0x0C)
+        let pidHex = String(properties.command.dropFirst(2))
+        guard let pidByte = UInt8(pidHex, radix: 16) else { return nil }
 
-        
+        // Find PID echo byte in response instead of assuming sequential order
+        guard let pidIndex = response.firstIndex(of: pidByte) else { return nil }
+        guard pidIndex + size <= response.endIndex else { return nil }
+        let valueData = response[pidIndex..<(pidIndex + size)]
+        response.removeSubrange(pidIndex..<(pidIndex + size))
+
+        let result = cmd.properties.decode(data: Data(valueData), unit: unit)
 
         switch result {
         case let .success(measurementResult):
@@ -504,18 +517,6 @@ extension Data {
 enum ECUHeader {
     static let ENGINE = "7E0"
 }
-
-// Possible setup errors
-// enum SetupError: Error {
-//    case noECUCharacteristic
-//    case invalidResponse(message: String)
-//    case noProtocolFound
-//    case adapterInitFailed
-//    case timeout
-//    case peripheralNotFound
-//    case ignitionOff
-//    case invalidProtocol
-// }
 
 public struct OBDInfo: Codable, Hashable {
     public var vin: String?
