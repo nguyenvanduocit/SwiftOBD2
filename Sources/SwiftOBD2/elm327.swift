@@ -79,7 +79,14 @@ class ELM327 {
         comm.connectionStatePublisher
             .receive(on: DispatchQueue.main)
             .sink { [weak self] state in
-                self?.connectionState = state
+                guard let self else { return }
+                // Only forward disconnect/error from comm layer.
+                // connectedToAdapter is set during connectToAdapter(),
+                // connectedToVehicle is set during setupVehicle().
+                // Forwarding connectedToAdapter here races with setupVehicle()
+                // and can overwrite connectedToVehicle back to connectedToAdapter.
+                guard state == .disconnected || state == .error else { return }
+                self.connectionState = state
                 obdDebug("Connection state updated: \(state.description)", category: .protocol)
             }
             .store(in: &cancellables)
