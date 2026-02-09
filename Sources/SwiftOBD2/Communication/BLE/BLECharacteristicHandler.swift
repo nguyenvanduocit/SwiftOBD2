@@ -1,66 +1,63 @@
 import Foundation
-import OSLog
 import CoreBluetooth
 
 class BLECharacteristicHandler {
     private var ecuReadCharacteristic: CBCharacteristic?
-       private var ecuWriteCharacteristic: CBCharacteristic?
-       private let messageProcessor: BLEMessageProcessor
-       private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.app", category: "BLECharacteristicHandler")
+    private var ecuWriteCharacteristic: CBCharacteristic?
+    private let messageProcessor: BLEMessageProcessor
 
-       var isReady: Bool {
-           ecuReadCharacteristic != nil && ecuWriteCharacteristic != nil
-       }
+    var isReady: Bool {
+        ecuReadCharacteristic != nil && ecuWriteCharacteristic != nil
+    }
 
-       init(messageProcessor: BLEMessageProcessor) {
-           self.messageProcessor = messageProcessor
-       }
-
+    init(messageProcessor: BLEMessageProcessor) {
+        self.messageProcessor = messageProcessor
+    }
 
     func setupCharacteristics(_ characteristics: [CBCharacteristic], on peripheral: CBPeripheral) {
-           for characteristic in characteristics {
-               // Set up notifications for characteristics that support it
-               if characteristic.properties.contains(.notify) {
-                   peripheral.setNotifyValue(true, for: characteristic)
-               }
+        for characteristic in characteristics {
+            // Set up notifications for characteristics that support it
+            if characteristic.properties.contains(.notify) {
+                peripheral.setNotifyValue(true, for: characteristic)
+            }
 
-               // Assign characteristics based on UUID and properties
-               switch characteristic.uuid.uuidString.uppercased() {
-               case "FFE1": // for service FFE0 (read and write)
-                   if characteristic.properties.contains(.write) {
-                       ecuWriteCharacteristic = characteristic
-                   }
-                   if characteristic.properties.contains(.read) || characteristic.properties.contains(.notify) {
-                       ecuReadCharacteristic = characteristic
-                   }
+            // Assign characteristics based on UUID and properties
+            switch characteristic.uuid.uuidString.uppercased() {
+            case "FFE1": // for service FFE0 (read and write)
+                if characteristic.properties.contains(.write) {
+                    ecuWriteCharacteristic = characteristic
+                }
+                if characteristic.properties.contains(.read) || characteristic.properties.contains(.notify) {
+                    ecuReadCharacteristic = characteristic
+                }
 
-               case "FFF1": // for service FFF0 (read only)
-                   if characteristic.properties.contains(.read) || characteristic.properties.contains(.notify) {
-                       ecuReadCharacteristic = characteristic
-                   }
+            case "FFF1": // for service FFF0 (read only)
+                if characteristic.properties.contains(.read) || characteristic.properties.contains(.notify) {
+                    ecuReadCharacteristic = characteristic
+                }
 
-               case "FFF2": // for service FFF0 (write only)
-                   if characteristic.properties.contains(.write) {
-                       ecuWriteCharacteristic = characteristic
-                   }
+            case "FFF2": // for service FFF0 (write only)
+                if characteristic.properties.contains(.write) {
+                    ecuWriteCharacteristic = characteristic
+                }
 
-               case "2AF0": // for service 18F0 (read)
-                   if characteristic.properties.contains(.read) || characteristic.properties.contains(.notify) {
-                       ecuReadCharacteristic = characteristic
-                   }
+            case "2AF0": // for service 18F0 (read)
+                if characteristic.properties.contains(.read) || characteristic.properties.contains(.notify) {
+                    ecuReadCharacteristic = characteristic
+                }
 
-               case "2AF1": // for service 18F0 (write)
-                   if characteristic.properties.contains(.write) {
-                       ecuWriteCharacteristic = characteristic
-                   }
+            case "2AF1": // for service 18F0 (write)
+                if characteristic.properties.contains(.write) {
+                    ecuWriteCharacteristic = characteristic
+                }
 
-               default:
-                   logger.debug("Unknown characteristic: \(characteristic.uuid.uuidString)")
-               }
-           }
+            default:
+                obdDebug("Unknown characteristic: \(characteristic.uuid.uuidString)", category: .bluetooth)
+            }
+        }
 
-        logger.info("Characteristics setup - Read: \(self.ecuReadCharacteristic != nil), Write: \(self.ecuWriteCharacteristic != nil)")
-       }
+        obdInfo("Characteristics setup - Read: \(self.ecuReadCharacteristic != nil), Write: \(self.ecuWriteCharacteristic != nil)", category: .bluetooth)
+    }
 
     func discoverCharacteristics(for service: CBService, on peripheral: CBPeripheral) {
         switch service.uuid {
@@ -82,19 +79,18 @@ class BLECharacteristicHandler {
         }
 
         peripheral.writeValue(data, for: characteristic, type: .withResponse)
-        logger.info("Sent command: \(command)")
+        obdInfo("Sent command: \(command)", category: .communication)
     }
 
     func handleUpdatedValue(_ data: Data, from characteristic: CBCharacteristic) {
         guard characteristic == ecuReadCharacteristic else {
             if let responseString = String(data: data, encoding: .utf8) {
-                logger.info("Unknown characteristic: \(characteristic)\nResponse: \(responseString)")
+                obdInfo("Unknown characteristic: \(characteristic)\nResponse: \(responseString)", category: .bluetooth)
             }
             return
         }
-        Task {
-            await messageProcessor.processReceivedData(data)
-        }
+
+        Task { await messageProcessor.processReceivedData(data) }
     }
 
     func reset() {

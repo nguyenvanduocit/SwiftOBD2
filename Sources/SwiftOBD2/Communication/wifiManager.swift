@@ -8,7 +8,6 @@
 import CoreBluetooth
 import Foundation
 import Network
-import OSLog
 
 protocol CommProtocol {
     func sendCommand(_ command: String, retries: Int) async throws -> [String]
@@ -27,8 +26,6 @@ enum CommunicationError: Error {
 class WifiManager: CommProtocol {
     @Published var connectionState: ConnectionState = .disconnected
 
-    let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.app", category: "wifiManager")
-
     var obdDelegate: OBDServiceDelegate?
 
     var connectionStatePublisher: Published<ConnectionState>.Publisher { $connectionState }
@@ -43,18 +40,21 @@ class WifiManager: CommProtocol {
         tcp = NWConnection(host: host, port: port, using: .tcp)
 
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            var hasResumed = false
             tcp?.stateUpdateHandler = { [weak self] newState in
-                guard let self = self else { return }
+                guard let self = self, !hasResumed else { return }
                 switch newState {
                 case .ready:
-                    self.logger.info("Connected to \(host.debugDescription):\(port.debugDescription)")
+                    hasResumed = true
                     self.connectionState = .connectedToAdapter
+                    obdInfo("Connected to \(host.debugDescription):\(port.debugDescription)", category: .wifi)
                     continuation.resume(returning: ())
                 case let .waiting(error):
-                    self.logger.warning("Connection waiting: \(error.localizedDescription)")
+                    obdWarning("Connection waiting: \(error.localizedDescription)", category: .wifi)
                 case let .failed(error):
-                    self.logger.error("Connection failed: \(error.localizedDescription)")
+                    hasResumed = true
                     self.connectionState = .disconnected
+                    obdError("Connection failed: \(error.localizedDescription)", category: .wifi)
                     continuation.resume(throwing: CommunicationError.errorOccurred(error))
                 default:
                     break
@@ -68,7 +68,7 @@ class WifiManager: CommProtocol {
         guard let data = "\(command)\r".data(using: .ascii) else {
             throw CommunicationError.invalidData
         }
-        logger.info("Sending: \(command)")
+        obdInfo("Sending: \(command)", category: .wifi)
         return try await sendCommandInternal(data: data, retries: retries)
     }
 
@@ -79,14 +79,14 @@ class WifiManager: CommProtocol {
                 if let lines = processResponse(response) {
                     return lines
                 } else if attempt < retries {
-                    logger.info("No data received, retrying attempt \(attempt + 1) of \(retries)...")
+                    obdInfo("No data received, retrying attempt \(attempt + 1) of \(retries)...", category: .wifi)
                     try await Task.sleep(nanoseconds: 100_000_000) // 0.5 seconds delay
                 }
             } catch {
                 if attempt == retries {
                     throw error
                 }
-                logger.warning("Attempt \(attempt) failed, retrying: \(error.localizedDescription)")
+                obdWarning("Attempt \(attempt) failed, retrying: \(error.localizedDescription)", category: .wifi)
             }
         }
         throw CommunicationError.invalidData
@@ -96,25 +96,23 @@ class WifiManager: CommProtocol {
         guard let tcpConnection = tcp else {
              throw CommunicationError.invalidData
          }
-        let logger = self.logger // Avoid capturing `self` directly
-
         return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
             tcpConnection.send(content: data, completion: .contentProcessed { error in
                 if let error = error {
-                    logger.error("Error sending data: \(error.localizedDescription)")
+                    obdError("Error sending data: \(error.localizedDescription)", category: .wifi)
                     continuation.resume(throwing: CommunicationError.errorOccurred(error))
                     return
                 }
 
                 tcpConnection.receive(minimumIncompleteLength: 1, maximumLength: 500) { data, _, _, error in
                     if let error = error {
-                        logger.error("Error receiving data: \(error.localizedDescription)")
+                        obdError("Error receiving data: \(error.localizedDescription)", category: .wifi)
                         continuation.resume(throwing: CommunicationError.errorOccurred(error))
                         return
                     }
 
                     guard let response = data, let responseString = String(data: response, encoding: .utf8) else {
-                        logger.warning("Received invalid or empty data")
+                        obdWarning("Received invalid or empty data", category: .wifi)
                         continuation.resume(throwing: CommunicationError.invalidData)
                         return
                     }
@@ -126,11 +124,11 @@ class WifiManager: CommProtocol {
     }
 
     private func processResponse(_ response: String) -> [String]? {
-        logger.info("Processing response: \(response)")
+        obdInfo("Processing response: \(response)", category: .wifi)
         var lines = response.components(separatedBy: .newlines).filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 
         guard !lines.isEmpty else {
-            logger.warning("Empty response lines")
+            obdWarning("Empty response lines", category: .wifi)
             return nil
         }
 

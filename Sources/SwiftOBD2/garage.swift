@@ -43,9 +43,6 @@ public class Garage: ObservableObject {
     private var nextId = 0 // Initialize with the next integer ID
 
     public init() {
-        // Load garageVehicles from UserDefaults
-//        UserDefaults.standard.removeObject(forKey: "garageVehicles")
-//        UserDefaults.standard.removeObject(forKey: "currentCarId")
         currentVehicleId = UserDefaults.standard.integer(forKey: "currentCarId")
 
         #if targetEnvironment(simulator)

@@ -1,5 +1,4 @@
 import Foundation
-import OSLog
 import CoreBluetooth
 import Combine
 
@@ -9,7 +8,6 @@ protocol BLEPeripheralManagerDelegate: AnyObject {
 
 class BLEPeripheralManager: NSObject, ObservableObject {
     @Published var connectedPeripheral: CBPeripheral?
-    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.app", category: "BLEPeripheralManager")
     private let characteristicHandler: BLECharacteristicHandler
 
     weak var delegate: BLEPeripheralManagerDelegate?
@@ -64,14 +62,14 @@ class BLEPeripheralManager: NSObject, ObservableObject {
 
     func didDiscoverServices(_ peripheral: CBPeripheral, error: Error?) {
         for service in peripheral.services ?? [] {
-            logger.info("Discovered service: \(service.uuid.uuidString)")
+            obdInfo("Discovered service: \(service.uuid.uuidString)", category: .bluetooth)
             characteristicHandler.discoverCharacteristics(for: service, on: peripheral)
         }
     }
 
     func didDiscoverCharacteristics(_ peripheral: CBPeripheral, service: CBService, error: Error?) {
         if let error = error {
-            logger.error("Error discovering characteristics: \(error.localizedDescription)")
+            obdError("Error discovering characteristics: \(error.localizedDescription)", category: .bluetooth)
             connectionCompletion?(nil, error)
             connectionCompletion = nil
             return
@@ -87,7 +85,7 @@ class BLEPeripheralManager: NSObject, ObservableObject {
             delegate?.peripheralManager(self, didSetupCharacteristics: peripheral)
         } else {
             let error = BLEManagerError.missingPeripheralOrCharacteristic
-            logger.error("Required characteristics not found for service \(service.uuid.uuidString)")
+            obdError("Required characteristics not found for service \(service.uuid.uuidString)", category: .bluetooth)
             connectionCompletion?(nil, error)
             connectionCompletion = nil
         }
@@ -95,7 +93,7 @@ class BLEPeripheralManager: NSObject, ObservableObject {
 
     func didUpdateValue(_: CBPeripheral, characteristic: CBCharacteristic, error: Error?) {
         if let error = error {
-            logger.error("Error reading characteristic value: \(error.localizedDescription)")
+            obdError("Error reading characteristic value: \(error.localizedDescription)", category: .bluetooth)
             return
         }
 

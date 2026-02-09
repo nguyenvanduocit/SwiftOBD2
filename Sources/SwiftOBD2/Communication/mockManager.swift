@@ -1,12 +1,12 @@
 //
-//  File.swift
+//  mockManager.swift
 //
 //
 //  Created by kemo konteh on 3/16/24.
 //
 
 import Foundation
-import OSLog
+
 import CoreBluetooth
 
 enum CommandAction {
@@ -23,7 +23,6 @@ struct MockECUSettings {
 }
 
 class MOCKComm: CommProtocol {
-    let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.app", category: "MOCKComm")
 
     @Published var connectionState: ConnectionState = .disconnected
     var connectionStatePublisher: Published<ConnectionState>.Publisher { $connectionState }
@@ -32,7 +31,7 @@ class MOCKComm: CommProtocol {
     var ecuSettings: MockECUSettings = .init()
 
     func sendCommand(_ command: String, retries: Int = 3) async throws -> [String] {
-        logger.info("Sending command: \(command)")
+        obdDebug("Mock sending command: \(command)", category: .communication)
         var header = ""
 
         let prefix = String(command.prefix(2))
@@ -57,35 +56,35 @@ class MOCKComm: CommProtocol {
             mode = mode + 40
 
             if response.count > 18 {
-                var chunks = response.chunked(by: 15)
+                let chunks = response.chunked(by: 15)
 
-                var ff = chunks[0]
+                var firstFrame = chunks[0]
 
-                var Totallength = 0
+                var totalLength = 0
 
-                let ffLength = ff.replacingOccurrences(of: " ", with: "").count / 2
+                let firstFrameLength = firstFrame.replacingOccurrences(of: " ", with: "").count / 2
 
-                Totallength += ffLength
+                totalLength += firstFrameLength
 
-                var cf = Array(chunks.dropFirst())
-                Totallength += cf.joined().replacingOccurrences(of: " ", with: "").count
+                var consecutiveFrames = Array(chunks.dropFirst())
+                totalLength += consecutiveFrames.joined().replacingOccurrences(of: " ", with: "").count
 
-                var lengthHex = String(format: "%02X", Totallength - 1)
+                var lengthHex = String(format: "%02X", totalLength - 1)
 
                 if lengthHex.count % 2 != 0 {
                     lengthHex = "0" + lengthHex
                 }
 
                 lengthHex = "10 " + lengthHex
-                ff = lengthHex + " " + String(mode) + " " + ff
+                firstFrame = lengthHex + " " + String(mode) + " " + firstFrame
 
-                var assembledFrame: [String] = [ff]
-                var cfCount = 33
-                for i in 0..<cf.count {
-                    let length = String(format: "%02X", cfCount)
-                    cfCount += 1
-                    cf[i] = length + " " + cf[i]
-                    assembledFrame.append(cf[i])
+                var assembledFrame: [String] = [firstFrame]
+                var seqCounter = 33
+                for i in 0..<consecutiveFrames.count {
+                    let length = String(format: "%02X", seqCounter)
+                    seqCounter += 1
+                    consecutiveFrames[i] = length + " " + consecutiveFrames[i]
+                    assembledFrame.append(consecutiveFrames[i])
                 }
 
                 for i in 0..<assembledFrame.count {
@@ -110,7 +109,7 @@ class MOCKComm: CommProtocol {
                 }
                 return [response]
             }
-        } else  if command.hasPrefix("AT") {
+        } else if command.hasPrefix("AT") {
             let action = String(command.dropFirst(2))
             var response: [String] = {
                 // Handle ATSH with any header (e.g., "SH7E0", "SH726", " SH 7E0")
@@ -144,7 +143,7 @@ class MOCKComm: CommProtocol {
                 }
             }()
             if ecuSettings.echo {
-                response .insert(command, at: 0)
+                response.insert(command, at: 0)
             }
             return response
 

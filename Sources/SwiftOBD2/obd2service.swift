@@ -48,7 +48,7 @@ public class OBDService: ObservableObject, OBDServiceDelegate {
     @Published public private(set) var connectedPeripheral: CBPeripheral?
     @Published public var connectionType: ConnectionType {
         didSet {
-            switchConnectionType(connectionType)
+            switchConnectionType()
             ConfigurationService.shared.connectionType = connectionType
         }
     }
@@ -95,22 +95,22 @@ public class OBDService: ObservableObject, OBDServiceDelegate {
 
     /// Initiates the connection process to the OBD2 adapter and vehicle.
     ///
-    /// - Parameter preferedProtocol: The optional OBD2 protocol to use (if supported).
+    /// - Parameter preferredProtocol: The optional OBD2 protocol to use (if supported).
     /// - Returns: Information about the connected vehicle (`OBDInfo`).
     /// - Throws: Errors that might occur during the connection process.
-    public func startConnection(preferedProtocol: PROTOCOL? = nil, timeout: TimeInterval = 7) async throws -> OBDInfo {
+    public func startConnection(preferredProtocol: PROTOCOL? = nil, timeout: TimeInterval = 7) async throws -> OBDInfo {
         let startTime = CFAbsoluteTimeGetCurrent()
         obdInfo("Starting connection with timeout: \(timeout)s", category: .connection)
-        
+
         do {
             obdDebug("Connecting to adapter...", category: .connection)
             try await elm327.connectToAdapter(timeout: timeout)
-            
+
             obdDebug("Initializing adapter...", category: .connection)
             try await elm327.adapterInitialization()
-            
+
             obdDebug("Initializing vehicle connection...", category: .connection)
-            let vehicleInfo = try await initializeVehicle(preferedProtocol)
+            let vehicleInfo = try await initializeVehicle(preferredProtocol)
 
             let duration = CFAbsoluteTimeGetCurrent() - startTime
             OBDLogger.shared.logPerformance("Connection established", duration: duration, success: true)
@@ -127,11 +127,11 @@ public class OBDService: ObservableObject, OBDServiceDelegate {
 
     /// Initializes communication with the vehicle and retrieves vehicle information.
     ///
-    /// - Parameter preferedProtocol: The optional OBD2 protocol to use (if supported).
+    /// - Parameter preferredProtocol: The optional OBD2 protocol to use (if supported).
     /// - Returns: Information about the connected vehicle (`OBDInfo`).
     /// - Throws: Errors if the vehicle initialization process fails.
-    func initializeVehicle(_ preferedProtocol: PROTOCOL?) async throws -> OBDInfo {
-        let obd2info = try await elm327.setupVehicle(preferredProtocol: preferedProtocol)
+    func initializeVehicle(_ preferredProtocol: PROTOCOL?) async throws -> OBDInfo {
+        let obd2info = try await elm327.setupVehicle(preferredProtocol: preferredProtocol)
         return obd2info
     }
 
@@ -141,9 +141,7 @@ public class OBDService: ObservableObject, OBDServiceDelegate {
     }
 
     /// Switches the active connection type (between Bluetooth and Wi-Fi).
-    ///
-    /// - Parameter connectionType: The new desired connection type.
-    private func switchConnectionType(_ connectionType: ConnectionType) {
+    private func switchConnectionType() {
         stopConnection()
         initializeELM327()
     }
@@ -206,15 +204,49 @@ public class OBDService: ObservableObject, OBDServiceDelegate {
     /// - Returns: measurement result
     /// - Throws: Errors that might occur during the request process.
     public func requestPIDs(_ commands: [OBDCommand], unit: MeasurementUnit) async throws -> [OBDCommand: MeasurementResult] {
-        let response = try await sendCommandInternal("01" + commands.compactMap { $0.properties.command.dropFirst(2) }.joined(), retries: 10)
+        let pidHexCodes = commands.map { String($0.properties.command.dropFirst(2)) }
+        let batchCommand = "01" + pidHexCodes.joined()
+        let response = try await sendCommandInternal(batchCommand, retries: 10)
 
         guard let responseData = try elm327.canProtocol?.parse(response).first?.data else { return [:] }
 
-        var batchedResponse = BatchedResponse(response: responseData, unit)
+        // Build lookup from PID hex to command
+        let pidToCommand: [String: OBDCommand] = Dictionary(
+            commands.map { (String($0.properties.command.dropFirst(2)), $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
 
-        let results: [OBDCommand: MeasurementResult] = commands.reduce(into: [:]) { result, command in
-            let measurement = batchedResponse.extractValue(command)
-            result[command] = measurement
+        var results: [OBDCommand: MeasurementResult] = [:]
+        var data = Data(responseData)
+
+        // Parse response by matching PID echo bytes
+        while !data.isEmpty {
+            let pidByte = data.removeFirst()
+            let pidHex = String(format: "%02X", pidByte)
+
+            guard let command = pidToCommand[pidHex] else {
+                obdWarning("Unknown PID echo byte in batch response: \(pidHex)", category: .parsing)
+                break
+            }
+
+            let dataSize = command.properties.bytes
+            guard data.count >= dataSize else {
+                obdWarning("Insufficient data for PID \(pidHex): expected \(dataSize) bytes, got \(data.count)", category: .parsing)
+                break
+            }
+
+            let valueData = data.prefix(dataSize)
+            data.removeFirst(dataSize)
+
+            let result = command.properties.decode(data: valueData, unit: unit)
+            switch result {
+            case let .success(decodeResult):
+                if case let .measurementResult(measurement) = decodeResult {
+                    results[command] = measurement
+                }
+            case let .failure(error):
+                obdError("Failed to decode PID \(pidHex): \(error)", category: .parsing)
+            }
         }
 
         return results
@@ -269,11 +301,7 @@ public class OBDService: ObservableObject, OBDServiceDelegate {
     ///  - Returns: The vehicle's status.
     ///  - Throws: Errors that might occur during the request process.
     public func getStatus() async throws -> Result<DecodeResult, DecodeError> {
-        do {
-            return try await elm327.getStatus()
-        } catch {
-            throw error
-        }
+        try await elm327.getStatus()
     }
 
     // MARK: - Mode 22 (Enhanced/Manufacturer-Specific)

@@ -1,9 +1,7 @@
 import Foundation
-import OSLog
 
 actor BLEMessageProcessor {
     private var buffer = Data()
-    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.app", category: "BLEMessageProcessor")
     private var messageCompletion: (([String]?, Error?) -> Void)?
 
     func processReceivedData(_ data: Data) {
@@ -12,7 +10,7 @@ actor BLEMessageProcessor {
         guard let string = String(data: buffer, encoding: .utf8) else {
             // Only clear if buffer is getting too large
             if buffer.count > BLEConstants.maxBufferSize {
-                logger.warning("Buffer exceeded max size, clearing")
+                obdWarning("Buffer exceeded max size, clearing", category: .communication)
                 buffer.removeAll()
             }
             return
@@ -34,37 +32,39 @@ actor BLEMessageProcessor {
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
 
-        logger.debug("Parsed response: \(lines)")
+        obdDebug("Parsed response: \(lines)", category: .communication)
         return lines
     }
 
     private func handleParsedResponse(_ lines: [String]) {
-       let completion = messageCompletion
-       messageCompletion = nil
+        let completion = messageCompletion
+        messageCompletion = nil
 
-       guard let completion = completion else {
-           logger.warning("Received response with no pending completion")
-           return
-       }
-
-       if let firstLine = lines.first, firstLine.uppercased().contains("NO DATA") {
-           completion(nil, BLEManagerError.noData)
-       } else if lines.isEmpty {
-           completion(nil, BLEManagerError.noData)
-       } else {
-           completion(lines, nil)
-       }
-   }
-
-
-    func waitForResponse(timeout: TimeInterval) async throws -> [String] {
-        guard messageCompletion == nil else {
-            throw BLEMessageProcessorError.commandAlreadyInProgress
+        guard let completion = completion else {
+            obdWarning("Received response with no pending completion", category: .communication)
+            return
         }
 
-        return try await withTimeout(seconds: timeout, timeoutError: BLEMessageProcessorError.responseTimeout) {
-            try await withCheckedThrowingContinuation { continuation in
+        if let firstLine = lines.first, firstLine.uppercased().contains("NO DATA") {
+            completion(nil, BLEManagerError.noData)
+        } else if lines.isEmpty {
+            completion(nil, BLEManagerError.noData)
+        } else {
+            completion(lines, nil)
+        }
+    }
+
+    func waitForResponse(timeout: TimeInterval) async throws -> [String] {
+        try await withTimeout(seconds: timeout, timeoutError: BLEMessageProcessorError.responseTimeout) { [self] in
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<[String], Error>) in
                 self.assumeIsolated { isolatedSelf in
+                    // Check if there's already a pending command
+                    if isolatedSelf.messageCompletion != nil {
+                        obdError("Concurrent command detected - previous command still pending", category: .communication)
+                        isolatedSelf.messageCompletion?(nil, BLEMessageProcessorError.responseTimeout)
+                        isolatedSelf.messageCompletion = nil
+                    }
+
                     isolatedSelf.messageCompletion = { response, error in
                         if let response = response {
                             continuation.resume(returning: response)
@@ -80,30 +80,24 @@ actor BLEMessageProcessor {
     }
 
     func reset() {
-           buffer.removeAll()
-           let completion = messageCompletion
-           messageCompletion = nil
+        buffer.removeAll()
+        let completion = messageCompletion
+        messageCompletion = nil
 
-           // Call completion with error if it exists
-           completion?(nil, BLEManagerError.peripheralNotConnected)
-       }
+        // Call completion with error if it exists
+        completion?(nil, BLEManagerError.peripheralNotConnected)
+    }
 }
 
 // MARK: - Error Types
 
 enum BLEMessageProcessorError: Error, LocalizedError {
-    case characteristicNotWritable
-    case writeOperationFailed
     case responseTimeout
     case invalidResponseData
     case commandAlreadyInProgress
 
     var errorDescription: String? {
         switch self {
-        case .characteristicNotWritable:
-            return "BLE characteristic does not support write operations"
-        case .writeOperationFailed:
-            return "Failed to write data to BLE characteristic"
         case .responseTimeout:
             return "Timeout waiting for BLE response"
         case .invalidResponseData:

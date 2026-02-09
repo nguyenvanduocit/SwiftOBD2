@@ -125,28 +125,15 @@ public class OBDLogger {
     
     /// Log performance metrics
     public func logPerformance(_ operation: String, duration: TimeInterval, success: Bool = true) {
-        let status = success ? "✓" : "✗"
+        let status = success ? "[OK]" : "[FAIL]"
         info("\(status) \(operation): \(String(format: "%.3f", duration))s", category: .performance)
     }
     
-    /// Log Bluetooth specific events (deprecated - use direct obdInfo/obdDebug instead)
-    @available(*, deprecated, message: "Use obdInfo() or obdDebug() with .bluetooth category directly")
-    public func logBluetoothEvent(_ event: String, peripheral: String? = nil, service: String? = nil) {
-        var message = event
-        if let peripheral = peripheral {
-            message += " | Peripheral: \(peripheral)"
-        }
-        if let service = service {
-            message += " | Service: \(service)"
-        }
-        info(message, category: .bluetooth)
-    }
-    
     /// Log protocol detection and negotiation
-    public func logProtocolEvent(_ event: String, protocol: String? = nil, details: String? = nil) {
+    public func logProtocolEvent(_ event: String, protocolName: String? = nil, details: String? = nil) {
         var message = event
-        if let `protocol` = `protocol` {
-            message += " | Protocol: \(`protocol`)"
+        if let protocolName = protocolName {
+            message += " | Protocol: \(protocolName)"
         }
         if let details = details {
             message += " | Details: \(details)"

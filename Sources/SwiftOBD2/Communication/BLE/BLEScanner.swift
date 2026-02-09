@@ -1,15 +1,12 @@
 import Combine
 import CoreBluetooth
 import Foundation
-import OSLog
 
 /// Focused component responsible for BLE device discovery and peripheral management
 actor BLEPeripheralScanner {
     private var foundPeripherals: [CBPeripheral] = []
 
     nonisolated let peripheralSubject = PassthroughSubject<CBPeripheral, Never>()
-
-    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.app", category: "BLEPeripheralScanner")
 
     nonisolated var peripheralPublisher: AnyPublisher<CBPeripheral, Never> {
         peripheralSubject.eraseToAnyPublisher()
@@ -24,21 +21,21 @@ actor BLEPeripheralScanner {
     private var foundPeripheralCompletion: ((CBPeripheral?, Error?) -> Void)?
 
     func addDiscoveredPeripheral(_ peripheral: CBPeripheral, advertisementData: [String: Any], rssi: NSNumber) {
-        // Filter out peripherals with invalid RSSI
         guard rssi.intValue < 0 else { return }
 
-        if let index = foundPeripherals.firstIndex(where: { $0.identifier == peripheral.identifier }) {
-            foundPeripherals[index] = peripheral
-        } else {
-            foundPeripherals.append(peripheral)
-            peripheralSubject.send(peripheral)
-            logger.info("Found new peripheral: \(peripheral.name ?? "Unnamed") - RSSI: \(rssi)")
-        }
+        DispatchQueue.main.async { [self] in
+            if let index = foundPeripherals.firstIndex(where: { $0.identifier == peripheral.identifier }) {
+                foundPeripherals[index] = peripheral
+            } else {
+                foundPeripherals.append(peripheral)
+                peripheralSubject.send(peripheral)
+                obdInfo("Found new peripheral: \(peripheral.name ?? "Unnamed") - RSSI: \(rssi)", category: .bluetooth)
+            }
 
-        // Clear before calling to prevent double-resume if another peripheral arrives
-        let completion = foundPeripheralCompletion
-        foundPeripheralCompletion = nil
-        completion?(peripheral, nil)
+            let completion = foundPeripheralCompletion
+            foundPeripheralCompletion = nil
+            completion?(peripheral, nil)
+        }
     }
 
     func waitForFirstPeripheral(timeout: TimeInterval) async throws -> CBPeripheral {
@@ -68,7 +65,6 @@ actor BLEPeripheralScanner {
         foundPeripheralCompletion = nil
     }
 }
-// MARK: - CBPeripheralDelegate
 
 // MARK: - Error Types
 

@@ -1,18 +1,4 @@
-// MARK: - BLEManager Class Documentation
-
-/// The BLEManager class is a wrapper around the CoreBluetooth framework. It is responsible for managing the connection to the OBD2 adapter,
-/// scanning for peripherals, and handling the communication with the adapter.
-///
-/// **Key Responsibilities:**
-/// - Scanning for peripherals
-/// - Connecting to peripherals
-/// - Managing the connection state
-/// - Handling the communication with the adapter
-/// - Processing the characteristics of the adapter
-/// - Sending messages to the adapter
-/// - Receiving messages from the adapter
-/// - Parsing the received messages
-/// - Handling errors
+/// BLE communication manager for OBD-II adapters via CoreBluetooth.
 
 import Combine
 import CoreBluetooth
@@ -57,9 +43,6 @@ enum BLEConstants {
 }
 
 class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
-    private let peripheralSubject = PassthroughSubject<CBPeripheral, Never>()
-    // Replaced with centralized logging - see connectionStateDidChange for usage
-
     static let RestoreIdentifierKey: String = "OBD2Adapter"
 
     // MARK: Properties
@@ -79,10 +62,9 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
     private var peripheralScanner: BLEPeripheralScanner!
 
     private var cancellables = Set<AnyCancellable>()
-    
+
     deinit {
         // Clean up resources
-        cancellables.removeAll()
         disconnectPeripheral()
         obdDebug("BLEManager deinitialized", category: .bluetooth)
     }
@@ -93,7 +75,7 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
         super.init()
         // Use background queue for better performance, but dispatch UI updates to main queue
         let bleQueue = DispatchQueue(label: "com.swiftobd2.ble", qos: .userInitiated)
-        
+
         centralManager = CBCentralManager(
             delegate: self,
             queue: bleQueue,
@@ -112,13 +94,13 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
     // MARK: - Central Manager Control Methods
 
     func startScanning(_ serviceUUIDs: [CBUUID]?) {
-        guard centralManager.state == .poweredOn else { 
+        guard centralManager.state == .poweredOn else {
             obdWarning("Cannot start scanning - Bluetooth not powered on", category: .bluetooth)
-            return 
+            return
         }
-        
+
         obdDebug("Starting BLE scan for services: \(serviceUUIDs?.map { $0.uuidString } ?? ["All"])", category: .bluetooth)
-        
+
         // Use allowDuplicates: false for better performance - we don't need duplicate discovery events
         let scanOptions = [CBCentralManagerScanOptionAllowDuplicatesKey: false]
         centralManager.scanForPeripherals(withServices: serviceUUIDs, options: scanOptions)
@@ -148,6 +130,9 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
             let oldState = connectionState
             connectionState = .disconnected
             OBDLogger.shared.logConnectionChange(from: oldState, to: connectionState)
+            DispatchQueue.main.async {
+                self.obdDelegate?.connectionStateChanged(state: .disconnected)
+            }
         case .unsupported:
             obdError("Device does not support Bluetooth Low Energy", category: .bluetooth)
         case .unauthorized:
@@ -163,6 +148,7 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
 
     func centralManagerDidPowerOn() {
         guard let device = peripheralManager.connectedPeripheral else {
+            obdDebug("Bluetooth powered on, waiting for connectAsync()", category: .bluetooth)
             return
         }
         // Restored peripheral that's still connected: discover services directly
@@ -183,15 +169,15 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
     func connect(to peripheral: CBPeripheral) {
         let peripheralName = peripheral.name ?? "Unnamed"
         obdInfo("Attempting connection to peripheral: \(peripheralName)", category: .bluetooth)
-        
+
         let oldState = connectionState
         connectionState = .connecting
         OBDLogger.shared.logConnectionChange(from: oldState, to: connectionState)
-        
+
         DispatchQueue.main.async {
             self.obdDelegate?.connectionStateChanged(state: .connecting)
         }
-        
+
         centralManager.connect(peripheral, options: [CBConnectPeripheralOptionNotifyOnDisconnectionKey: true])
         if centralManager.isScanning {
             centralManager.stopScan()
@@ -208,11 +194,11 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
         let peripheralName = peripheral.name ?? "Unnamed"
         let errorMsg = error?.localizedDescription ?? "Unknown error"
         obdError("Connection failed to peripheral: \(peripheralName) - \(errorMsg)", category: .bluetooth)
-        
+
         let oldState = connectionState
         connectionState = .error
         OBDLogger.shared.logConnectionChange(from: oldState, to: connectionState)
-        
+
         DispatchQueue.main.async {
             self.obdDelegate?.connectionStateChanged(state: .error)
         }
@@ -267,26 +253,26 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
         let oldState = connectionState
         connectionState = .connectedToAdapter
         OBDLogger.shared.logConnectionChange(from: oldState, to: connectionState)
-        
+
         // Dispatch delegate call to main queue since it might update UI
         DispatchQueue.main.async {
             self.obdDelegate?.connectionStateChanged(state: .connectedToAdapter)
         }
-        
+
         obdInfo("Characteristics setup complete, connected to adapter", category: .bluetooth)
     }
 
     func waitForPoweredOn() async throws {
         let maxWaitTime = BLEConstants.bluetoothPowerOnTimeout
         let startTime = CFAbsoluteTimeGetCurrent()
-        
+
         while centralManager.state != .poweredOn {
             // Check for timeout
             if CFAbsoluteTimeGetCurrent() - startTime > maxWaitTime {
                 obdError("Bluetooth failed to power on within \(maxWaitTime) seconds", category: .bluetooth)
                 throw BLEManagerError.timeout
             }
-            
+
             // Check for terminal states
             switch centralManager.state {
             case .unsupported:
@@ -300,32 +286,27 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
             default:
                 break
             }
-            
+
             try await Task.sleep(nanoseconds: BLEConstants.pollingInterval)
         }
-        
+
         obdDebug("Bluetooth powered on successfully", category: .bluetooth)
     }
 
 
     /// Sends a message to the connected peripheral and returns the response.
-    /// - Parameter message: The message to send.
+    /// - Parameters:
+    ///   - command: The command to send.
+    ///   - retries: Number of retries (currently unused, reserved for future implementation).
     /// - Returns: The response from the peripheral.
-    /// - Throws:
-    ///     `BLEManagerError.sendingMessagesInProgress` if a message is already being sent.
-    ///     `BLEManagerError.missingPeripheralOrCharacteristic` if the peripheral or ecu characteristic is missing.
-    ///     `BLEManagerError.incorrectDataConversion` if the data cannot be converted to ASCII.
-    ///     `BLEManagerError.peripheralNotConnected` if the peripheral is not connected.
-    ///     `BLEManagerError.timeout` if the operation times out.
-    ///     `BLEManagerError.unknownError` if an unknown error occurs.
-    func sendCommand(_ command: String, retries _: Int = 3) async throws -> [String] {
+    func sendCommand(_ command: String, retries: Int = 3) async throws -> [String] {
         guard let peripheral = peripheralManager.connectedPeripheral else {
             obdError("Missing peripheral or ECU characteristic", category: .bluetooth)
             throw BLEManagerError.missingPeripheralOrCharacteristic
         }
 
         obdDebug("Sending command: \(command)", category: .communication)
-        
+
         do {
             try characteristicHandler.writeCommand(command, to: peripheral)
             let response = try await messageProcessor.waitForResponse(timeout: BLEConstants.defaultTimeout)
@@ -399,12 +380,7 @@ extension BLEManager: CBCentralManagerDelegate {
 
 enum BLEManagerError: Error, CustomStringConvertible {
     case missingPeripheralOrCharacteristic
-    case unknownCharacteristic
-    case scanTimeout
-    case sendMessageTimeout
-    case stringConversionFailed
     case noData
-    case incorrectDataConversion
     case peripheralNotConnected
     case sendingMessagesInProgress
     case timeout
@@ -417,18 +393,8 @@ enum BLEManagerError: Error, CustomStringConvertible {
         switch self {
         case .missingPeripheralOrCharacteristic:
             return "Error: Device not connected. Make sure the device is correctly connected."
-        case .scanTimeout:
-            return "Error: Scan timed out. Please try to scan again or check the device's Bluetooth connection."
-        case .sendMessageTimeout:
-            return "Error: Send message timed out. Please try to send the message again or check the device's Bluetooth connection."
-        case .stringConversionFailed:
-            return "Error: Failed to convert string. Please make sure the string is in the correct format."
         case .noData:
             return "Error: No Data"
-        case .unknownCharacteristic:
-            return "Error: Unknown characteristic"
-        case .incorrectDataConversion:
-            return "Error: Incorrect data conversion"
         case .peripheralNotConnected:
             return "Error: Peripheral not connected"
         case .sendingMessagesInProgress:

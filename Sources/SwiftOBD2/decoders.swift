@@ -88,7 +88,7 @@ extension Unit {
 class UAS {
     let signed: Bool
     let scale: Double
-    var unit: Unit
+    let unit: Unit
     let offset: Double
 
     init(signed: Bool, scale: Double, unit: Unit, offset: Double = 0.0) {
@@ -98,7 +98,7 @@ class UAS {
         self.offset = offset
     }
 
-    func decode(bytes: Data, _ unit_: MeasurementUnit = .metric) -> MeasurementResult {
+    func decode(bytes: Data, _ measurementUnit: MeasurementUnit = .metric) -> MeasurementResult {
         var value = bytesToInt(bytes)
 
         if signed {
@@ -106,43 +106,42 @@ class UAS {
         }
 
         var scaledValue = Double(value) * scale + offset
+        var resultUnit = self.unit
 
-        if unit_ == .imperial {
-            scaledValue = convertToImperial(scaledValue, unitType: self.unit)
+        if measurementUnit == .imperial {
+            let (convertedValue, convertedUnit) = convertToImperial(scaledValue, unitType: self.unit)
+            scaledValue = convertedValue
+            resultUnit = convertedUnit
         }
 
-        return MeasurementResult(value: scaledValue, unit: unit)
+        return MeasurementResult(value: scaledValue, unit: resultUnit)
     }
 
-
-    private func convertToImperial(_ value: Double, unitType: Unit) -> Double {
-          switch unitType {
-          case UnitTemperature.celsius:
-              self.unit = UnitTemperature.fahrenheit
-              return (value * 1.8) + 32 // Convert Celsius to Fahrenheit
-          case UnitLength.kilometers:
-                self.unit = UnitLength.miles
-                return value * 0.621371 // Convert km to miles
-          case UnitSpeed.kilometersPerHour:
-              self.unit = UnitSpeed.milesPerHour
-              return value * 0.621371 // Convert km/h to mph
-          case UnitPressure.kilopascals:
-              self.unit = UnitPressure.poundsForcePerSquareInch
-                return value * 0.145038 // Convert kPa to psi
-          case .gramsPerSecond:
-              return value * 0.00220462 // Convert grams/sec to pounds/sec
-            case .bar:
-                self.unit = UnitPressure.poundsForcePerSquareInch
-                return value * 14.5038 // Convert bar to psi
-          default:
-              return value // Other units remain unchanged
-          }
-      }
+    private func convertToImperial(_ value: Double, unitType: Unit) -> (Double, Unit) {
+        switch unitType {
+        case UnitTemperature.celsius:
+            return ((value * 1.8) + 32, UnitTemperature.fahrenheit)
+        case UnitLength.kilometers:
+            return (value * 0.621371, UnitLength.miles)
+        case UnitSpeed.kilometersPerHour:
+            return (value * 0.621371, UnitSpeed.milesPerHour)
+        case UnitPressure.kilopascals:
+            return (value * 0.145038, UnitPressure.poundsForcePerSquareInch)
+        case .gramsPerSecond:
+            return (value * 0.00220462, unitType)
+        case .bar:
+            return (value * 14.5038, UnitPressure.poundsForcePerSquareInch)
+        default:
+            return (value, unitType)
+        }
+    }
 }
 
 func twosComp(_ value: Int, length: Int) -> Int {
-    let mask = (1 << length) - 1
-    return value & mask
+    if value >= (1 << (length - 1)) {
+        return value - (1 << length)
+    }
+    return value
 }
 
 private var uasIDS: [UInt8: UAS] = {
@@ -324,9 +323,8 @@ public enum Decoders: Equatable, Encodable {
             case .encoded_string:
                 return StringDecoder()
             case .uas(let id):
-                let decoder = UASDecoder(id: id)
-                return decoder
-            default:
+                return UASDecoder(id: id)
+            case .pid, .count, .none, .auxInputStatus, .cvn:
                 return nil
             }
         }
