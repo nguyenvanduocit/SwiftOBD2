@@ -30,85 +30,42 @@ class MOCKComm: CommProtocol {
 
     var ecuSettings: MockECUSettings = .init()
 
+    // State for smooth mock values (random walk instead of pure random)
+    private var lastValues: [String: Double] = [:]
+
     func sendCommand(_ command: String, retries: Int = 3) async throws -> [String] {
         obdDebug("Mock sending command: \(command)", category: .communication)
-        var header = ""
 
         let prefix = String(command.prefix(2))
         if prefix == "01" || prefix == "06" || prefix == "09" {
-            var response: String = ""
-            if ecuSettings.headerOn {
-                header = "7E8"
-            }
+            // Collect response bytes for all PIDs in the batch
+            var responseBytes: [UInt8] = []
+
             for i in stride(from: 2, to: command.count, by: 2) {
                 let index = command.index(command.startIndex, offsetBy: i)
                 let nextIndex = command.index(command.startIndex, offsetBy: i + 2)
                 let subCommand = prefix + String(command[index..<nextIndex])
-                guard let value = OBDCommand.mockResponse(forCommand: subCommand) else {
+                guard let hexStr = mockResponse(forCommand: subCommand) else {
                     return ["No Data"]
-
                 }
-                response.append(value + " ")
+                let bytes = hexStr.trimmingCharacters(in: .whitespaces)
+                    .split(separator: " ")
+                    .compactMap { UInt8($0, radix: 16) }
+                responseBytes.append(contentsOf: bytes)
             }
-            guard var mode = Int(command.prefix(2)) else {
-                return [""]
+
+            guard var mode = Int(command.prefix(2)) else { return [""] }
+            mode += 40
+
+            let header = ecuSettings.headerOn ? "7E8" : ""
+            let payload = [UInt8(mode)] + responseBytes
+
+            var frames = buildISOTPFrames(payload: payload, header: header)
+            if ecuSettings.echo {
+                frames.insert(" \(command)", at: 0)
             }
-            mode = mode + 40
+            return frames
 
-            if response.count > 18 {
-                let chunks = response.chunked(by: 15)
-
-                var firstFrame = chunks[0]
-
-                var totalLength = 0
-
-                let firstFrameLength = firstFrame.replacingOccurrences(of: " ", with: "").count / 2
-
-                totalLength += firstFrameLength
-
-                var consecutiveFrames = Array(chunks.dropFirst())
-                totalLength += consecutiveFrames.joined().replacingOccurrences(of: " ", with: "").count
-
-                var lengthHex = String(format: "%02X", totalLength - 1)
-
-                if lengthHex.count % 2 != 0 {
-                    lengthHex = "0" + lengthHex
-                }
-
-                lengthHex = "10 " + lengthHex
-                firstFrame = lengthHex + " " + String(mode) + " " + firstFrame
-
-                var assembledFrame: [String] = [firstFrame]
-                var seqCounter = 33
-                for i in 0..<consecutiveFrames.count {
-                    let length = String(format: "%02X", seqCounter)
-                    seqCounter += 1
-                    consecutiveFrames[i] = length + " " + consecutiveFrames[i]
-                    assembledFrame.append(consecutiveFrames[i])
-                }
-
-                for i in 0..<assembledFrame.count {
-                    assembledFrame[i] = header + " " + assembledFrame[i]
-                    while assembledFrame[i].count < 28 {
-                        assembledFrame[i].append("00 ")
-                    }
-                }
-
-                if ecuSettings.echo {
-                    assembledFrame.insert(" \(command)", at: 0)
-                }
-                return assembledFrame.map { String($0) }
-            } else {
-                let lengthHex = String(format: "%02X", response.count / 3)
-                response = header + " " + lengthHex + " "  + String(mode) + " " + response
-                while response.count < 28 {
-                    response.append("00 ")
-                }
-                if ecuSettings.echo {
-                    response = " \(command)" + response
-                }
-                return [response]
-            }
         } else if command.hasPrefix("AT") {
             let action = String(command.dropFirst(2))
             var response: [String] = {
@@ -137,7 +94,8 @@ class MOCKComm: CommProtocol {
                 case "DPN":
                     return ["06"]
                 case "RV":
-                    return [String(Double.random(in: 12.0 ... 14.0))]
+                    let v = smoothed("battVoltage", min: 12.4, max: 14.2, step: 0.05)
+                    return [String(format: "%.1f", v)]
                 default:
                     return ["NO DATA"]
                 }
@@ -159,6 +117,7 @@ class MOCKComm: CommProtocol {
                 response +=  hexString
                 obdDebug("Generated DTC hex: \(hexString)", category: .communication)
             }
+            var header = ""
             if ecuSettings.headerOn {
                 header = "7E8"
             }
@@ -176,9 +135,12 @@ class MOCKComm: CommProtocol {
             if ecuSettings.headerOn {
                 header = "7E8"
             }
-            // Generate mock response: 62 + PID echo + random data bytes
+            // Generate mock response: 62 + PID echo + smooth data bytes
             let pidEcho = String(command.dropFirst(2)) // e.g., "1E1C"
-            let dataBytes = (0..<2).map { _ in String(format: "%02X", Int.random(in: 0...255)) }.joined(separator: " ")
+            let key = "enh_\(pidEcho)"
+            let b0 = Int(smoothed(key + "_0", min: 50, max: 200, step: 5))
+            let b1 = Int(smoothed(key + "_1", min: 50, max: 200, step: 5))
+            let dataBytes = String(format: "%02X %02X", b0, b1)
             var response = "62 \(pidEcho.chunked(by: 2).joined(separator: " ")) \(dataBytes)"
             let length = String(format: "%02X", response.replacingOccurrences(of: " ", with: "").count / 2)
             response = header + " " + length + " " + response
@@ -187,7 +149,7 @@ class MOCKComm: CommProtocol {
             }
             return [response]
         } else {
-            guard var response = OBDCommand.mockResponse(forCommand: command) else {
+            guard var response = mockResponse(forCommand: command) else {
                 return ["No Data"]
             }
             response = command + response  + "\r\n\r\n>"
@@ -199,176 +161,159 @@ class MOCKComm: CommProtocol {
         }
     }
 
-    func disconnectPeripheral() {
-        connectionState = .disconnected
-        obdDelegate?.connectionStateChanged(state: .disconnected)
+    // MARK: - ISO-TP Frame Builder (byte-based, replaces buggy string-chunking)
+
+    private func buildISOTPFrames(payload: [UInt8], header: String) -> [String] {
+        func formatFrame(_ bytes: [UInt8]) -> String {
+            let hex = bytes.map { String(format: "%02X", $0) }.joined(separator: " ")
+            return header.isEmpty ? hex : header + " " + hex
+        }
+
+        if payload.count <= 7 {
+            // Single frame: PCI byte (0x0N where N = length) + payload + padding
+            var frame: [UInt8] = [UInt8(payload.count)] + payload
+            while frame.count < 8 { frame.append(0x00) }
+            return [formatFrame(frame)]
+        }
+
+        // Multi-frame ISO-TP
+        var remaining = Array(payload)
+        var frames: [String] = []
+
+        // First frame: [1X, XX] (total length in 12 bits) + up to 6 data bytes
+        let totalLen = payload.count
+        var ff: [UInt8] = [
+            0x10 | UInt8((totalLen >> 8) & 0x0F),
+            UInt8(totalLen & 0xFF)
+        ]
+        let ffCount = min(6, remaining.count)
+        ff.append(contentsOf: remaining.prefix(ffCount))
+        remaining.removeFirst(ffCount)
+        while ff.count < 8 { ff.append(0x00) }
+        frames.append(formatFrame(ff))
+
+        // Consecutive frames: [2X] (sequence 0-F) + up to 7 data bytes
+        var seq: UInt8 = 1
+        while !remaining.isEmpty {
+            var cf: [UInt8] = [0x20 | (seq & 0x0F)]
+            let cfCount = min(7, remaining.count)
+            cf.append(contentsOf: remaining.prefix(cfCount))
+            remaining.removeFirst(cfCount)
+            while cf.count < 8 { cf.append(0x00) }
+            frames.append(formatFrame(cf))
+            seq += 1
+        }
+
+        return frames
     }
 
-    func connectAsync(timeout: TimeInterval, peripheral: CBPeripheral? = nil) async throws {
-        connectionState = .connectedToAdapter
-        obdDelegate?.connectionStateChanged(state: .connectedToAdapter)
+    // MARK: - Smooth Value Generation
+
+    private func smoothed(_ key: String, min: Double, max: Double, step: Double) -> Double {
+        let prev = lastValues[key] ?? Double.random(in: min...max)
+        let delta = Double.random(in: -step...step)
+        let next = Swift.min(max, Swift.max(min, prev + delta))
+        lastValues[key] = next
+        return next
     }
 
-    func scanForPeripherals() async throws {
+    // MARK: - Mock PID Responses
 
-    }
-}
-
-extension OBDCommand {
-    static func mockResponse(forCommand command: String) -> String? {
-
-        guard let obd2Command = self.from(command: command) else {
+    private func mockResponse(forCommand command: String) -> String? {
+        guard let obd2Command = OBDCommand.from(command: command) else {
             obdWarning("Invalid mock command: \(command)", category: .communication)
             return "Invalid command"
         }
 
         switch obd2Command {
-            case .mode1(let command):
-             switch command {
-                case .pidsA:
-                    return "00 BE 3F A8 13 00"
-                case .status:
-                    return "01 12 34 56 78 00"
-                case .pidsB:
-                    return "20 90 07 E0 11 00"
-                case .pidsC:
-                    return "40 FA DC 80 00 00"
-                case .rpm:
-                    let desiredRPM = Int.random(in: 1000...3000)
-                    let decimalRep = desiredRPM * 4
-
-                    let A = decimalRep / 256
-                    let B = decimalRep % 256
-
-                    let hexA = String(format: "%02X", A)
-                    let hexB = String(format: "%02X", B)
-
-                    return "0C" + " " + hexA + " " + hexB
-                case .speed:
-                    let hexSpeed = String(format: "%02X", Int.random(in: 0...100))
-                    return "0D" + " " + hexSpeed
-                case .coolantTemp:
-                  let temp = Int.random(in: 50...150) + 40
-                 let hexTemp = String(format: "%02X", temp)
-                 return "05" + " " + hexTemp
-                case .maf:
-                    let maf = Int.random(in: 0...655) * 100
-                    let A = maf / 256
-                    let B = maf % 256
-
-                    let hexA = String(format: "%02X", A)
-                    let hexB = String(format: "%02X", B)
-
-                    return "10" + " " + hexA + " " + hexB
-                case .engineLoad:
-                    let load = Int.random(in: 0...100)
-                    let hexLoad = String(format: "%02X", load)
-                    return "04" + " " + hexLoad
-                case .throttlePos:
-                    let pos = Int.random(in: 0...100)
-                    let hexPos = String(format: "%02X", pos)
-                    return "11" + " " + hexPos
-                case .fuelLevel:
-                    let level = Int.random(in: 0...100)
-                    let hexLevel = String(format: "%02X", Int(Double(level) * 2.55))
-                    return "2F" + " " + hexLevel
-                case .fuelPressure:
-                    let pressure = Int.random(in: 0...765)
-                    let hexPressure = String(format: "%02X", pressure / 3)
-                    return "0A" + " " + hexPressure
-                case .intakeTemp:
-                    let temp = Int.random(in: 0...100) + 40
-                    let hexTemp = String(format: "%02X", temp)
-                    return "0F" + " " + hexTemp
-                case .timingAdvance:
-                    let advance = Int.random(in: 0...100)
-                    let hexAdvance = String(format: "%02X", advance / 2)
-                    return "0E" + " " + hexAdvance
-                case .intakePressure:
-                    let pressure = Int.random(in: 0...255)
-                    let hexPressure = String(format: "%02X", pressure)
-                    return "0B" + " " + hexPressure
-                case .barometricPressure:
-                    let pressure = Int.random(in: 0...255)
-                    let hexPressure = String(format: "%02X", pressure)
-                    return "33" + " " + hexPressure
-                case .fuelType:
-                    return "01 01"
-                case .fuelRailPressureDirect:
-                    let pressure = Int.random(in: 0...655) * 100
-                    let A = pressure / 256
-                    let B = pressure % 256
-
-                    let hexA = String(format: "%02X", A)
-                    let hexB = String(format: "%02X", B)
-                    return "23" + " " + hexA + " " + hexB
-                case .ethanoPercent:
-                    let fuel = Int.random(in: 0...100)
-                    let hexFuel = String(format: "%02X", fuel)
-                    return "52" + " " + hexFuel
-                case .engineOilTemp:
-                    let temp = Int.random(in: 0...100) + 40
-                    let hexTemp = String(format: "%02X", temp)
-                    return "5C" + " " + hexTemp
-                case .fuelInjectionTiming:
-                    let timing = Int.random(in: 0...655) * 100
-                    let A = timing / 256
-                    let B = timing % 256
-
-                    let hexA = String(format: "%02X", A)
-                    let hexB = String(format: "%02X", B)
-                    return "5D" + " " + hexA + " " + hexB
-                case .fuelRate:
-                    let rate = Int.random(in: 3...120)
-                    let A = rate / 256
-                    let B = rate % 256
-
-                    let hexA = String(format: "%02X", A)
-                    let hexB = String(format: "%02X", B)
-                    return "5E" + " " + hexA + " " + hexB
-                case .emissionsReq:
-                    return "01 01"
-                case .runTime:
-                    let runtime = Int.random(in: 0...655) * 100
-                    let A = runtime / 256
-                    let B = runtime % 256
-
-                    let hexA = String(format: "%02X", A)
-                    let hexB = String(format: "%02X", B)
-                    return "1F" + " " + hexA + " " + hexB
-                case .distanceSinceDTCCleared:
-                    let distance = Int.random(in: 100...6550)
-                 
-                    let A = distance / 256
-                    let B = distance % 256
-
-                    let hexA = String(format: "%02X", A)
-                    let hexB = String(format: "%02X", B)
-                    return "31" + " " + hexA + " " + hexB
-                case .distanceWMIL:
-
-                    let distance = Int.random(in: 100...6550)
-                    let A = distance / 256
-                    let B = distance % 256
-
-                    let hexA = String(format: "%02X", A)
-                    let hexB = String(format: "%02X", B)
-                    return "21" + " " + hexA + " " + hexB
-                case .warmUpsSinceDTCCleared:
-                    let warmUp = Int.random(in: 0...40)
-                    let hexWarmUp = String(format: "%02X", warmUp)
-                    return "30" + " 00 00 " + hexWarmUp
-                case .hybridBatteryLife:
-                    let life = Int.random(in: 100...65500)
-                 
-                    let A = life / 256
-                    let B = life % 256
-
-                    let hexA = String(format: "%02X", A)
-                    let hexB = String(format: "%02X", B)
-                    return "5B" + " " + hexA + " " + hexB
-                default:
-                    return nil
+        case .mode1(let command):
+            switch command {
+            case .pidsA:
+                return "00 BE 3F A8 13 00"
+            case .status:
+                return "01 12 34 56 78 00"
+            case .pidsB:
+                return "20 90 07 E0 11 00"
+            case .pidsC:
+                return "40 FA DC 80 00 00"
+            case .rpm:
+                let rpm = Int(smoothed("rpm", min: 800, max: 3500, step: 80))
+                let encoded = rpm * 4
+                return String(format: "0C %02X %02X", encoded >> 8, encoded & 0xFF)
+            case .speed:
+                let speed = Int(smoothed("speed", min: 0, max: 120, step: 3))
+                return String(format: "0D %02X", speed)
+            case .coolantTemp:
+                let temp = Int(smoothed("coolant", min: 70, max: 105, step: 1))
+                return String(format: "05 %02X", temp + 40)
+            case .maf:
+                let maf = Int(smoothed("maf", min: 5, max: 250, step: 10))
+                let encoded = maf * 100
+                return String(format: "10 %02X %02X", encoded >> 8, encoded & 0xFF)
+            case .engineLoad:
+                let load = smoothed("load", min: 15, max: 85, step: 5)
+                return String(format: "04 %02X", Int(load * 2.55))
+            case .throttlePos:
+                let pos = smoothed("throttle", min: 10, max: 75, step: 4)
+                return String(format: "11 %02X", Int(pos * 2.55))
+            case .fuelLevel:
+                let level = smoothed("fuel", min: 30, max: 80, step: 0.2)
+                return String(format: "2F %02X", Int(level * 2.55))
+            case .fuelPressure:
+                let pressure = Int(smoothed("fuelPressure", min: 200, max: 400, step: 5))
+                return String(format: "0A %02X", pressure / 3)
+            case .intakeTemp:
+                let temp = Int(smoothed("intakeTemp", min: 20, max: 60, step: 1))
+                return String(format: "0F %02X", temp + 40)
+            case .timingAdvance:
+                let advance = smoothed("timing", min: 5, max: 40, step: 2)
+                return String(format: "0E %02X", Int((advance + 64) * 2))
+            case .intakePressure:
+                let pressure = Int(smoothed("intakePressure", min: 20, max: 100, step: 3))
+                return String(format: "0B %02X", pressure)
+            case .barometricPressure:
+                let pressure = Int(smoothed("barometric", min: 95, max: 105, step: 0.5))
+                return String(format: "33 %02X", pressure)
+            case .fuelType:
+                return "51 01"
+            case .fuelRailPressureDirect:
+                let raw = Int(smoothed("fuelRailDirect", min: 2000, max: 5000, step: 50))
+                return String(format: "23 %02X %02X", raw >> 8, raw & 0xFF)
+            case .ethanoPercent:
+                let pct = Int(smoothed("ethanol", min: 0, max: 15, step: 0.5))
+                return String(format: "52 %02X", pct)
+            case .engineOilTemp:
+                let temp = Int(smoothed("oilTemp", min: 80, max: 120, step: 1))
+                return String(format: "5C %02X", temp + 40)
+            case .fuelInjectionTiming:
+                let raw = Int(smoothed("injTiming", min: 5000, max: 35000, step: 500))
+                return String(format: "5D %02X %02X", raw >> 8, raw & 0xFF)
+            case .fuelRate:
+                let rate = Int(smoothed("fuelRate", min: 3, max: 60, step: 2))
+                return String(format: "5E %02X %02X", rate >> 8, rate & 0xFF)
+            case .emissionsReq:
+                return "01 01"
+            case .runTime:
+                // Run time increases monotonically (engine has been running)
+                let prev = lastValues["runTime"] ?? 300
+                let next = prev + Double.random(in: 0.8...1.2)
+                lastValues["runTime"] = next
+                let t = Int(next)
+                return String(format: "1F %02X %02X", t >> 8, t & 0xFF)
+            case .distanceSinceDTCCleared:
+                let dist = Int(smoothed("distDTC", min: 500, max: 6550, step: 1))
+                return String(format: "31 %02X %02X", dist >> 8, dist & 0xFF)
+            case .distanceWMIL:
+                let dist = Int(smoothed("distMIL", min: 100, max: 6550, step: 1))
+                return String(format: "21 %02X %02X", dist >> 8, dist & 0xFF)
+            case .warmUpsSinceDTCCleared:
+                let warmUp = Int(smoothed("warmups", min: 5, max: 40, step: 0.1))
+                return String(format: "30 %02X", warmUp)
+            case .hybridBatteryLife:
+                let life = Int(smoothed("hybridBat", min: 5000, max: 60000, step: 50))
+                return String(format: "5B %02X %02X", life >> 8, life & 0xFF)
+            default:
+                return nil
             }
         case .mode6(let command):
             switch command {
@@ -401,9 +346,22 @@ extension OBDCommand {
             return nil
         }
     }
+
+    func disconnectPeripheral() {
+        connectionState = .disconnected
+        obdDelegate?.connectionStateChanged(state: .disconnected)
+    }
+
+    func connectAsync(timeout: TimeInterval, peripheral: CBPeripheral? = nil) async throws {
+        connectionState = .connectedToAdapter
+        obdDelegate?.connectionStateChanged(state: .connectedToAdapter)
+    }
+
+    func scanForPeripherals() async throws {
+
+    }
 }
-//        case .O902: return  "10 14 49 02 01 31 4E 34 \r\n"
-//            + header + "21 41 4C 33 41 50 37 44 \r\n" + header + "22 43 31 39 39 35 38 33 \r\n\r\n>"
+
 extension String {
     func chunked(by chunkSize: Int) -> Array<String> {
         return stride(from: 0, to: self.count, by: chunkSize).map {

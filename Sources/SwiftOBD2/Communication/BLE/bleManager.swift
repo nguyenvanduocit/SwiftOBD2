@@ -56,15 +56,15 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
 
     // Focused components
     private var centralManager: CBCentralManager!
-    private var messageProcessor: BLEMessageProcessor!
-    private var characteristicHandler: BLECharacteristicHandler!
-    private var peripheralManager: BLEPeripheralManager!
-    private var peripheralScanner: BLEPeripheralScanner!
+    private let messageProcessor: BLEMessageProcessor
+    private let characteristicHandler: BLECharacteristicHandler
+    private let peripheralManager: BLEPeripheralManager
+    private let peripheralScanner: BLEPeripheralScanner
 
     private var cancellables = Set<AnyCancellable>()
+    private var centralManagerInitialized = false
 
     deinit {
-        // Clean up resources
         disconnectPeripheral()
         obdDebug("BLEManager deinitialized", category: .bluetooth)
     }
@@ -72,10 +72,22 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
     // MARK: - Initialization
 
     override init() {
+        messageProcessor = BLEMessageProcessor()
+        characteristicHandler = BLECharacteristicHandler(messageProcessor: messageProcessor)
+        peripheralManager = BLEPeripheralManager(characteristicHandler: characteristicHandler)
+        peripheralScanner = BLEPeripheralScanner()
         super.init()
-        // Use background queue for better performance, but dispatch UI updates to main queue
-        let bleQueue = DispatchQueue(label: "com.swiftobd2.ble", qos: .userInitiated)
+        peripheralManager.delegate = self
+    }
 
+    /// Creates CBCentralManager on first use. This is deferred from init() because
+    /// CBCentralManager with state restoration can block the calling thread for seconds,
+    /// and init() runs on the main thread during app launch.
+    private func ensureCentralManager() {
+        guard !centralManagerInitialized else { return }
+        centralManagerInitialized = true
+
+        let bleQueue = DispatchQueue(label: "com.swiftobd2.ble", qos: .userInitiated)
         centralManager = CBCentralManager(
             delegate: self,
             queue: bleQueue,
@@ -84,16 +96,12 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
                 CBCentralManagerOptionRestoreIdentifierKey: BLEManager.RestoreIdentifierKey,
             ]
         )
-
-        messageProcessor = BLEMessageProcessor()
-        characteristicHandler = BLECharacteristicHandler(messageProcessor: messageProcessor)
-        peripheralManager = BLEPeripheralManager(characteristicHandler: characteristicHandler)
-        peripheralScanner = BLEPeripheralScanner()
     }
 
     // MARK: - Central Manager Control Methods
 
     func startScanning(_ serviceUUIDs: [CBUUID]?) {
+        ensureCentralManager()
         guard centralManager.state == .poweredOn else {
             obdWarning("Cannot start scanning - Bluetooth not powered on", category: .bluetooth)
             return
@@ -107,6 +115,7 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
     }
 
     func stopScan() {
+        guard centralManagerInitialized else { return }
         if centralManager.isScanning {
             obdDebug("Stopping BLE scan", category: .bluetooth)
             centralManager.stopScan()
@@ -114,7 +123,8 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
     }
 
     func disconnectPeripheral() {
-        guard let peripheral = peripheralManager.connectedPeripheral else { return }
+        guard centralManagerInitialized,
+              let peripheral = peripheralManager.connectedPeripheral else { return }
         centralManager.cancelPeripheralConnection(peripheral)
     }
 
@@ -142,7 +152,9 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
         default:
             obdError("Bluetooth in unexpected state: \(central.state.rawValue)", category: .bluetooth)
             connectionState = .error
-            obdDelegate?.connectionStateChanged(state: .error)
+            DispatchQueue.main.async {
+                self.obdDelegate?.connectionStateChanged(state: .error)
+            }
         }
     }
 
@@ -167,6 +179,7 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
     }
 
     func connect(to peripheral: CBPeripheral) {
+        ensureCentralManager()
         let peripheralName = peripheral.name ?? "Unnamed"
         obdInfo("Attempting connection to peripheral: \(peripheralName)", category: .bluetooth)
 
@@ -229,6 +242,7 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
     // MARK: - Async Methods
 
     func connectAsync(timeout: TimeInterval, peripheral: CBPeripheral? = nil) async throws {
+        ensureCentralManager()
         try await waitForPoweredOn()
 
         if connectionState.isConnected {
@@ -326,7 +340,7 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
     }
 
     private func resetConfigure() {
-        stopScan()
+        if centralManagerInitialized { stopScan() }
         characteristicHandler.reset()
         peripheralManager.reset()
 

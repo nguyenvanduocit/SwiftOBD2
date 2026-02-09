@@ -55,28 +55,38 @@ actor BLEMessageProcessor {
     }
 
     func waitForResponse(timeout: TimeInterval) async throws -> [String] {
-        try await withTimeout(seconds: timeout, timeoutError: BLEMessageProcessorError.responseTimeout) { [self] in
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<[String], Error>) in
-                self.assumeIsolated { isolatedSelf in
-                    // Check if there's already a pending command
-                    if isolatedSelf.messageCompletion != nil {
-                        obdError("Concurrent command detected - previous command still pending", category: .communication)
-                        isolatedSelf.messageCompletion?(nil, BLEMessageProcessorError.responseTimeout)
-                        isolatedSelf.messageCompletion = nil
-                    }
+        // Timeout task calls back into actor to cancel the pending response
+        let timeoutTask = Task { [weak self] in
+            try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+            await self?.cancelPendingResponse(error: BLEMessageProcessorError.responseTimeout)
+        }
 
-                    isolatedSelf.messageCompletion = { response, error in
-                        if let response = response {
-                            continuation.resume(returning: response)
-                        } else if let error = error {
-                            continuation.resume(throwing: error)
-                        } else {
-                            continuation.resume(throwing: BLEMessageProcessorError.responseTimeout)
-                        }
-                    }
+        defer { timeoutTask.cancel() }
+
+        // Called directly from actor method → closure runs on actor executor → safe
+        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<[String], Error>) in
+            if messageCompletion != nil {
+                obdError("Concurrent command detected - previous command still pending", category: .communication)
+                messageCompletion?(nil, BLEMessageProcessorError.responseTimeout)
+                messageCompletion = nil
+            }
+
+            messageCompletion = { response, error in
+                if let response {
+                    continuation.resume(returning: response)
+                } else if let error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume(throwing: BLEMessageProcessorError.responseTimeout)
                 }
             }
         }
+    }
+
+    private func cancelPendingResponse(error: Error) {
+        guard let completion = messageCompletion else { return }
+        messageCompletion = nil
+        completion(nil, error)
     }
 
     func reset() {
@@ -93,17 +103,11 @@ actor BLEMessageProcessor {
 
 enum BLEMessageProcessorError: Error, LocalizedError {
     case responseTimeout
-    case invalidResponseData
-    case commandAlreadyInProgress
 
     var errorDescription: String? {
         switch self {
         case .responseTimeout:
             return "Timeout waiting for BLE response"
-        case .invalidResponseData:
-            return "Received invalid response data from BLE device"
-        case .commandAlreadyInProgress:
-            return "Another command is already in progress"
         }
     }
 }

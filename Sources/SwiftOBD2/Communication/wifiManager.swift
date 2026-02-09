@@ -8,6 +8,7 @@
 import CoreBluetooth
 import Foundation
 import Network
+import os
 
 protocol CommProtocol {
     func sendCommand(_ command: String, retries: Int) async throws -> [String]
@@ -40,22 +41,27 @@ class WifiManager: CommProtocol {
         tcp = NWConnection(host: host, port: port, using: .tcp)
 
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            var hasResumed = false
+            let hasResumed = OSAllocatedUnfairLock(initialState: false)
             tcp?.stateUpdateHandler = { [weak self] newState in
-                guard let self = self, !hasResumed else { return }
+                guard let self else { return }
                 switch newState {
                 case .ready:
-                    hasResumed = true
+                    guard hasResumed.withLock({ let old = $0; $0 = true; return !old }) else { return }
                     self.connectionState = .connectedToAdapter
                     obdInfo("Connected to \(host.debugDescription):\(port.debugDescription)", category: .wifi)
                     continuation.resume(returning: ())
                 case let .waiting(error):
                     obdWarning("Connection waiting: \(error.localizedDescription)", category: .wifi)
                 case let .failed(error):
-                    hasResumed = true
+                    guard hasResumed.withLock({ let old = $0; $0 = true; return !old }) else { return }
                     self.connectionState = .disconnected
                     obdError("Connection failed: \(error.localizedDescription)", category: .wifi)
                     continuation.resume(throwing: CommunicationError.errorOccurred(error))
+                case .cancelled:
+                    guard hasResumed.withLock({ let old = $0; $0 = true; return !old }) else { return }
+                    self.connectionState = .disconnected
+                    obdInfo("Connection cancelled", category: .wifi)
+                    continuation.resume(throwing: CancellationError())
                 default:
                     break
                 }

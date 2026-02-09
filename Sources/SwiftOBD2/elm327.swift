@@ -80,8 +80,7 @@ class ELM327 {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] state in
                 self?.connectionState = state
-                self?.obdDelegate?.connectionStateChanged(state: state)
-                obdDebug("Connection state updated: \(state.hashValue)", category: .protocol)
+                obdDebug("Connection state updated: \(state.description)", category: .protocol)
             }
             .store(in: &cancellables)
     }

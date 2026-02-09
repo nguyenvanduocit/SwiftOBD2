@@ -221,7 +221,7 @@ public class OBDService: ObservableObject, OBDServiceDelegate {
 
         // Parse response by matching PID echo bytes
         while !data.isEmpty {
-            let pidByte = data.removeFirst()
+            guard let pidByte = data.first else { break }
             let pidHex = String(format: "%02X", pidByte)
 
             guard let command = pidToCommand[pidHex] else {
@@ -229,16 +229,16 @@ public class OBDService: ObservableObject, OBDServiceDelegate {
                 break
             }
 
-            let dataSize = command.properties.bytes
-            guard data.count >= dataSize else {
-                obdWarning("Insufficient data for PID \(pidHex): expected \(dataSize) bytes, got \(data.count)", category: .parsing)
+            let totalSize = command.properties.bytes
+            guard data.count >= totalSize else {
+                obdWarning("Insufficient data for PID \(pidHex): expected \(totalSize) bytes, got \(data.count)", category: .parsing)
                 break
             }
 
-            let valueData = data.prefix(dataSize)
-            data.removeFirst(dataSize)
+            let pidData = data.prefix(totalSize)
+            data.removeFirst(totalSize)
 
-            let result = command.properties.decode(data: valueData, unit: unit)
+            let result = command.properties.decode(data: pidData, unit: unit)
             switch result {
             case let .success(decodeResult):
                 if case let .measurementResult(measurement) = decodeResult {
@@ -262,7 +262,7 @@ public class OBDService: ObservableObject, OBDServiceDelegate {
             guard let responseData = try elm327.canProtocol?.parse(response).first?.data else {
                 return .failure(.noData)
             }
-            return command.properties.decode(data: responseData.dropFirst())
+            return command.properties.decode(data: responseData)
         } catch {
             throw OBDServiceError.commandFailed(command: command.properties.command, error: error)
         }

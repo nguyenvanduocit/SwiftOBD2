@@ -23,19 +23,17 @@ actor BLEPeripheralScanner {
     func addDiscoveredPeripheral(_ peripheral: CBPeripheral, advertisementData: [String: Any], rssi: NSNumber) {
         guard rssi.intValue < 0 else { return }
 
-        DispatchQueue.main.async { [self] in
-            if let index = foundPeripherals.firstIndex(where: { $0.identifier == peripheral.identifier }) {
-                foundPeripherals[index] = peripheral
-            } else {
-                foundPeripherals.append(peripheral)
-                peripheralSubject.send(peripheral)
-                obdInfo("Found new peripheral: \(peripheral.name ?? "Unnamed") - RSSI: \(rssi)", category: .bluetooth)
-            }
-
-            let completion = foundPeripheralCompletion
-            foundPeripheralCompletion = nil
-            completion?(peripheral, nil)
+        if let index = foundPeripherals.firstIndex(where: { $0.identifier == peripheral.identifier }) {
+            foundPeripherals[index] = peripheral
+        } else {
+            foundPeripherals.append(peripheral)
+            peripheralSubject.send(peripheral)
+            obdInfo("Found new peripheral: \(peripheral.name ?? "Unnamed") - RSSI: \(rssi)", category: .bluetooth)
         }
+
+        let completion = foundPeripheralCompletion
+        foundPeripheralCompletion = nil
+        completion?(peripheral, nil)
     }
 
     func waitForFirstPeripheral(timeout: TimeInterval) async throws -> CBPeripheral {
@@ -43,21 +41,32 @@ actor BLEPeripheralScanner {
             return first
         }
 
-        return try await withTimeout(seconds: timeout, timeoutError: BLEScannerError.scanTimeout) {
-            try await withCheckedThrowingContinuation { continuation in
-                self.assumeIsolated { isolatedSelf in
-                    isolatedSelf.foundPeripheralCompletion = { peripheral, error in
-                        if let peripheral = peripheral {
-                            continuation.resume(returning: peripheral)
-                        } else if let error = error {
-                            continuation.resume(throwing: error)
-                        } else {
-                            continuation.resume(throwing: BLEScannerError.peripheralNotFound)
-                        }
-                    }
+        // Timeout task calls back into actor to cancel the pending wait
+        let timeoutTask = Task { [weak self] in
+            try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+            await self?.cancelPendingPeripheralWait(error: BLEScannerError.scanTimeout)
+        }
+
+        defer { timeoutTask.cancel() }
+
+        // Called directly from actor method → closure runs on actor executor → safe
+        return try await withCheckedThrowingContinuation { continuation in
+            foundPeripheralCompletion = { peripheral, error in
+                if let peripheral {
+                    continuation.resume(returning: peripheral)
+                } else if let error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume(throwing: BLEScannerError.peripheralNotFound)
                 }
             }
         }
+    }
+
+    private func cancelPendingPeripheralWait(error: Error) {
+        guard let completion = foundPeripheralCompletion else { return }
+        foundPeripheralCompletion = nil
+        completion(nil, error)
     }
 
     func reset() {
