@@ -31,7 +31,9 @@ class MOCKComm: CommProtocol {
     var ecuSettings: MockECUSettings = .init()
 
     // State for smooth mock values (random walk instead of pure random)
+    // Protected by lock — sendCommand is async and can be called concurrently
     private var lastValues: [String: Double] = [:]
+    private let lastValuesLock = NSLock()
 
     func sendCommand(_ command: String, retries: Int = 3) async throws -> [String] {
         obdDebug("Mock sending command: \(command)", category: .communication)
@@ -210,6 +212,8 @@ class MOCKComm: CommProtocol {
     // MARK: - Smooth Value Generation
 
     private func smoothed(_ key: String, min: Double, max: Double, step: Double) -> Double {
+        lastValuesLock.lock()
+        defer { lastValuesLock.unlock() }
         let prev = lastValues[key] ?? Double.random(in: min...max)
         let delta = Double.random(in: -step...step)
         let next = Swift.min(max, Swift.max(min, prev + delta))
@@ -295,9 +299,11 @@ class MOCKComm: CommProtocol {
                 return "01 01"
             case .runTime:
                 // Run time increases monotonically (engine has been running)
+                lastValuesLock.lock()
                 let prev = lastValues["runTime"] ?? 300
                 let next = prev + Double.random(in: 0.8...1.2)
                 lastValues["runTime"] = next
+                lastValuesLock.unlock()
                 let t = Int(next)
                 return String(format: "1F %02X %02X", t >> 8, t & 0xFF)
             case .distanceSinceDTCCleared:
